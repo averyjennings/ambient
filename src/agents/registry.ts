@@ -6,12 +6,17 @@ import type { AgentConfig } from "../types/index.js"
  * Each agent defines how to invoke its CLI in headless mode.
  * The router uses these configs to spawn the right subprocess
  * and stream output back to the user's terminal.
+ *
+ * `continueArgs` — if present, these args are appended to resume
+ * the last session instead of starting fresh. This enables
+ * multi-turn conversations through the daemon.
  */
 export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
   claude: {
     name: "claude",
     command: "claude",
     args: ["-p"],
+    continueArgs: ["--continue"],
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "Anthropic Claude Code",
@@ -21,6 +26,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     name: "codex",
     command: "codex",
     args: ["exec"],
+    // codex supports: codex exec resume --last "prompt"
+    // but the flag structure is different — handled specially in router
     streamFormat: "json-lines",
     contextInjection: "prompt-prefix",
     description: "OpenAI Codex CLI",
@@ -66,6 +73,7 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     name: "opencode",
     command: "opencode",
     args: ["run"],
+    continueArgs: ["-c"],
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "OpenCode",

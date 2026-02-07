@@ -4,16 +4,24 @@ import { createServer } from "node:net"
 import { existsSync, unlinkSync, writeFileSync } from "node:fs"
 import { ContextEngine } from "../context/engine.js"
 import { routeToAgent } from "../agents/router.js"
+import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
   ContextUpdatePayload,
   DaemonRequest,
   DaemonResponse,
   QueryPayload,
+  SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
 
 const context = new ContextEngine()
+
+// Session state — tracks active conversation for continuation
+let session: SessionState | null = null
+
+// Cache of available agents (detected on startup)
+let availableAgents: string[] = []
 
 function log(level: string, msg: string): void {
   const ts = new Date().toISOString()
@@ -44,6 +52,14 @@ async function handleRequest(
           recentCommands: ctx.recentCommands.length,
           uptime: process.uptime(),
           pid: process.pid,
+          session: session
+            ? {
+                agent: session.agentName,
+                queries: session.queryCount,
+                lastResponseLength: session.lastResponse.length,
+              }
+            : null,
+          availableAgents,
         }),
       })
       sendResponse(socket, { type: "done", data: "" })
@@ -57,31 +73,86 @@ async function handleRequest(
       break
     }
 
+    case "new-session": {
+      session = null
+      log("info", "Session reset")
+      sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
+    case "agents": {
+      const agentList = Object.entries(builtinAgents).map(([name, config]) => ({
+        name,
+        description: config.description,
+        installed: availableAgents.includes(name),
+        supportsContinuation: Boolean(config.continueArgs),
+      }))
+      sendResponse(socket, { type: "status", data: JSON.stringify(agentList) })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
     case "query": {
       const payload = request.payload as QueryPayload
       const config = loadConfig()
       const agentName = payload.agent ?? config.defaultAgent
 
-      // Build context block for prompt injection
-      // Temporarily update cwd if provided
+      // If agent changed or --new was passed, reset session
+      if (payload.newSession || (session && session.agentName !== agentName)) {
+        session = null
+      }
+
+      // Determine if we should continue an existing session
+      const shouldContinue = session !== null && session.agentName === agentName
+
+      // Update cwd context
       if (payload.cwd) {
         context.update({ event: "chpwd", cwd: payload.cwd })
       }
-      const contextBlock = context.formatForPrompt()
+
+      // Build context — for agents with native continuation, context is only
+      // injected on the first message. For others, include last response as context.
+      const agentConfig = builtinAgents[agentName]
+      let contextBlock = context.formatForPrompt()
+
+      // For agents WITHOUT native continuation, inject last response as pseudo-memory
+      if (shouldContinue && !agentConfig?.continueArgs && session?.lastResponse) {
+        const truncatedResponse = session.lastResponse.length > 2000
+          ? session.lastResponse.slice(0, 2000) + "\n... (truncated)"
+          : session.lastResponse
+        contextBlock += `\n\nPrevious assistant response:\n${truncatedResponse}`
+      }
 
       let prompt = payload.prompt
       if (payload.pipeInput) {
         prompt = `${payload.pipeInput}\n\n---\n\n${prompt}`
       }
 
-      log("info", `Routing to '${agentName}': ${prompt.slice(0, 100)}...`)
+      log("info", `Routing to '${agentName}'${shouldContinue ? " (continuing session)" : ""}: ${prompt.slice(0, 100)}...`)
 
-      await routeToAgent(
+      const result = await routeToAgent(
         prompt,
         agentName,
         contextBlock,
-        (response) => sendResponse(socket, response),
+        {
+          continueSession: shouldContinue,
+          onChunk: (response) => sendResponse(socket, response),
+        },
       )
+
+      // Update session state
+      if (session && session.agentName === agentName) {
+        session.queryCount++
+        session.lastResponse = result.fullResponse
+      } else {
+        session = {
+          agentName,
+          queryCount: 1,
+          lastResponse: result.fullResponse,
+          startedAt: Date.now(),
+        }
+      }
+
       break
     }
 
@@ -92,9 +163,13 @@ async function handleRequest(
   }
 }
 
-function startDaemon(): void {
+async function startDaemon(): Promise<void> {
   const socketPath = getSocketPath()
   const pidPath = getPidPath()
+
+  // Detect available agents on startup
+  availableAgents = await detectAvailableAgents()
+  log("info", `Available agents: ${availableAgents.join(", ") || "none detected"}`)
 
   // Clean up stale socket
   if (existsSync(socketPath)) {
@@ -163,7 +238,6 @@ function startDaemon(): void {
   let lastActivity = Date.now()
   const IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
-  // We track activity in the server connection handler above
   setInterval(() => {
     if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
       log("info", "Idle timeout reached, shutting down")
@@ -177,4 +251,8 @@ function startDaemon(): void {
   })
 }
 
-startDaemon()
+startDaemon().catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err)
+  process.stderr.write(`Failed to start daemon: ${message}\n`)
+  process.exit(1)
+})

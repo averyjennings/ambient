@@ -24,7 +24,7 @@ function waitForSocket(socketPath: string, timeoutMs: number): Promise<void> {
 
     function tryConnect(): void {
       if (Date.now() - start > timeoutMs) {
-        resolve() // give up, sendRequest will fail with a clear error
+        resolve()
         return
       }
 
@@ -49,7 +49,6 @@ async function ensureDaemonRunning(): Promise<void> {
     return
   }
 
-  // Start the daemon in the background
   const daemonScript = new URL("../daemon/index.js", import.meta.url).pathname
   const child = spawn(process.execPath, [daemonScript], {
     detached: true,
@@ -57,7 +56,6 @@ async function ensureDaemonRunning(): Promise<void> {
   })
   child.unref()
 
-  // Wait for the socket to accept connections (not just exist on disk)
   await waitForSocket(socketPath, 5000)
 }
 
@@ -133,7 +131,8 @@ async function readStdin(): Promise<string | undefined> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
 
-  // Handle subcommands
+  // --- Subcommands ---
+
   if (args[0] === "daemon") {
     if (args[1] === "stop") {
       await sendRequest({ type: "shutdown", payload: {} })
@@ -162,7 +161,7 @@ async function main(): Promise<void> {
     }
     const socketPath = getSocketPath()
     if (!existsSync(socketPath)) {
-      return // daemon not running, silently skip
+      return
     }
     try {
       const socket = connect(socketPath)
@@ -171,13 +170,64 @@ async function main(): Promise<void> {
         socket.end()
       })
       socket.on("error", () => {
-        // silently ignore — this is fire-and-forget
+        // silently ignore
       })
-      // Don't wait for response — exit immediately
       setTimeout(() => process.exit(0), 200)
     } catch {
       // silently ignore
     }
+    return
+  }
+
+  // Start a new conversation (reset session state)
+  if (args[0] === "new") {
+    await ensureDaemonRunning()
+    await sendRequest({ type: "new-session", payload: {} })
+    console.log("New session started.")
+    return
+  }
+
+  // List available agents
+  if (args[0] === "agents") {
+    await ensureDaemonRunning()
+    // Override the default status handler to format agent list nicely
+    const socketPath = getSocketPath()
+    await new Promise<void>((resolve) => {
+      const socket = connect(socketPath)
+      socket.on("connect", () => {
+        socket.write(JSON.stringify({ type: "agents", payload: {} }) + "\n")
+      })
+      let buf = ""
+      socket.on("data", (data) => {
+        buf += data.toString()
+        const lines = buf.split("\n")
+        buf = lines.pop() ?? ""
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const response = JSON.parse(line) as DaemonResponse
+          if (response.type === "status") {
+            const agents = JSON.parse(response.data) as Array<{
+              name: string
+              description: string
+              installed: boolean
+              supportsContinuation: boolean
+            }>
+            console.log("\x1b[1mAvailable agents:\x1b[0m\n")
+            for (const agent of agents) {
+              const status = agent.installed ? "\x1b[32m installed\x1b[0m" : "\x1b[90m not found\x1b[0m"
+              const cont = agent.supportsContinuation ? " [session]" : ""
+              console.log(`  ${agent.installed ? "\x1b[1m" : "\x1b[90m"}${agent.name}\x1b[0m — ${agent.description}${cont}${status}`)
+            }
+            console.log("\n\x1b[90m[session] = supports multi-turn conversation continuation\x1b[0m")
+          }
+          if (response.type === "done") {
+            socket.end()
+            resolve()
+          }
+        }
+      })
+      socket.on("error", () => resolve())
+    })
     return
   }
 
@@ -194,14 +244,17 @@ async function main(): Promise<void> {
     return
   }
 
-  // Parse --agent flag
+  // --- Parse flags ---
   let agentName: string | undefined
+  let newSession = false
   const queryArgs: string[] = []
 
   for (let i = 0; i < args.length; i++) {
     if ((args[i] === "--agent" || args[i] === "-a") && args[i + 1]) {
       agentName = args[i + 1]
-      i++ // skip next arg
+      i++
+    } else if (args[i] === "--new" || args[i] === "-n") {
+      newSession = true
     } else {
       queryArgs.push(args[i]!)
     }
@@ -213,13 +266,10 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  // Read piped input if any
   const pipeInput = await readStdin()
 
-  // Ensure daemon is running
   await ensureDaemonRunning()
 
-  // Send query
   const cwd = process.cwd()
   await sendRequest({
     type: "query",
@@ -228,6 +278,7 @@ async function main(): Promise<void> {
       agent: agentName,
       pipeInput,
       cwd,
+      newSession,
     },
   })
 }
@@ -237,18 +288,26 @@ function printUsage(): void {
 \x1b[1mambient\x1b[0m — agentic shell layer
 
 \x1b[1mUsage:\x1b[0m
-  r <natural language query>         Query using default agent
+  r <query>                          Query using default agent
   r --agent <name> <query>           Query using specific agent
   r -a claude <query>                Short form
+  r --new <query>                    Start a new conversation
   cat file | r "explain this"        Pipe input as context
+
+\x1b[1mConversation:\x1b[0m
+  Queries automatically continue the current session.
+  The agent remembers what you discussed previously.
+  r new                              Start a fresh conversation
+  r --new <query>                    New conversation with a query
+
+\x1b[1mAgents:\x1b[0m
+  r agents                           List available agents
+  r -a codex <query>                 Use a specific agent
 
 \x1b[1mDaemon:\x1b[0m
   r daemon start                     Start the background daemon
   r daemon stop                      Stop the daemon
-  r daemon status                    Show daemon status
-
-\x1b[1mAgents:\x1b[0m
-  claude, codex, gemini, goose, aider, copilot, opencode, gptme
+  r daemon status                    Show daemon status + session info
 
 \x1b[1mConfig:\x1b[0m
   r config                           Show config paths

@@ -11,6 +11,8 @@ export interface AgentConfig {
   readonly streamFormat: "text" | "json-lines" | "stream-json"
   readonly contextInjection: "prompt-prefix" | "stdin" | "mcp"
   readonly description?: string
+  /** Args to append for continuing the last session (e.g. ["--continue"]) */
+  readonly continueArgs?: readonly string[]
 }
 
 // --- Context ---
@@ -33,10 +35,23 @@ export interface CommandRecord {
   readonly timestamp: number
 }
 
+// --- Session state ---
+
+export interface SessionState {
+  /** Which agent the current session is with */
+  agentName: string
+  /** Number of queries in this session */
+  queryCount: number
+  /** Cached text from the last agent response */
+  lastResponse: string
+  /** When the session started */
+  startedAt: number
+}
+
 // --- IPC protocol (daemon <-> CLI) ---
 
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status"
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents"
   readonly payload: QueryPayload | ContextUpdatePayload | Record<string, never>
 }
 
@@ -45,6 +60,7 @@ export interface QueryPayload {
   readonly agent?: string
   readonly pipeInput?: string
   readonly cwd: string
+  readonly newSession?: boolean
 }
 
 export interface ContextUpdatePayload {
