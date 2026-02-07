@@ -25,7 +25,8 @@ fi
 _ambient_notify() {
   # Use `r notify` — no socat dependency needed
   # Run in background subshell so it never blocks the prompt
-  (eval "$AMBIENT_BIN" notify "'$1'" &>/dev/null &)
+  # ${=AMBIENT_BIN} splits "node /path/to/file" into words without re-expanding args
+  (${=AMBIENT_BIN} notify "$1" &>/dev/null &)
 }
 
 # --- Git helpers (fast, cached per prompt) ---
@@ -96,7 +97,7 @@ _ambient_ai_suggest() {
 
   # Query the daemon synchronously (ZLE widgets block)
   local result
-  result=$(eval "$AMBIENT_BIN" "Convert to a shell command: $input" 2>/dev/null)
+  result=$(${=AMBIENT_BIN} "Convert to a shell command: $input" 2>/dev/null)
 
   if [[ -n "$result" ]]; then
     BUFFER="$result"
@@ -116,7 +117,9 @@ bindkey '\ea' _ambient_ai_suggest  # Alt+A
 # If you need the original `r` (re-run last command), use `fc -e -` directly.
 disable -a r 2>/dev/null  # disable the built-in alias
 r() {
-  eval "$AMBIENT_BIN" "$@"
+  # ${=AMBIENT_BIN} splits the var into words (e.g. "node /path/to/cli")
+  # "$@" preserves user argument quoting (no re-expansion of globs like ? *)
+  ${=AMBIENT_BIN} "$@"
 }
 
 # --- Send initial context on shell startup ---
