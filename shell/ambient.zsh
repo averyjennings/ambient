@@ -7,25 +7,25 @@
 #   - preexec hook: tells the daemon what command is about to run
 #   - precmd hook:  tells the daemon the exit code + current state
 #   - chpwd hook:   tells the daemon when you change directories
-#   - r() function: query any coding agent with ambient context
 #   - Alt+A widget: inline AI suggestion in the command buffer
+#
+# No external dependencies — uses `r notify` for daemon communication.
 
-# --- Configuration ---
-AMBIENT_BIN="${AMBIENT_BIN:-r}"
-
-# --- Socket path (must match daemon) ---
-_ambient_socket() {
-  local runtime_dir="${XDG_RUNTIME_DIR:-$TMPDIR}"
-  echo "${runtime_dir}/ambient-$(id -u).sock"
-}
+# --- Resolve the ambient binary ---
+# Use the built binary from the project, or fall back to PATH
+if [[ -z "$AMBIENT_BIN" ]]; then
+  if [[ -x "${0:A:h}/../dist/cli/index.js" ]]; then
+    AMBIENT_BIN="node ${0:A:h}/../dist/cli/index.js"
+  else
+    AMBIENT_BIN="r"
+  fi
+fi
 
 # --- Send a fire-and-forget message to the daemon ---
 _ambient_notify() {
-  local socket="$(_ambient_socket)"
-  [[ -S "$socket" ]] || return 0
-
-  # Non-blocking send via background subshell
-  (echo "$1" | socat - "UNIX-CONNECT:${socket}" 2>/dev/null &)
+  # Use `r notify` — no socat dependency needed
+  # Run in background subshell so it never blocks the prompt
+  (eval "$AMBIENT_BIN" notify "'$1'" &>/dev/null &)
 }
 
 # --- Git helpers (fast, cached per prompt) ---
@@ -46,12 +46,23 @@ _ambient_refresh_git() {
   fi
 }
 
+# --- JSON escaping for command strings ---
+_ambient_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"    # backslash
+  s="${s//\"/\\\"}"    # double quote
+  s="${s//$'\n'/\\n}"  # newline
+  s="${s//$'\r'/\\r}"  # carriage return
+  s="${s//$'\t'/\\t}"  # tab
+  printf '%s' "$s"
+}
+
 # --- Hooks ---
 
 # preexec: runs after Enter, before the command executes
 _ambient_preexec() {
-  local cmd="$1"
-  _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":$(printf '%s' "$cmd" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"cwd\":\"$PWD\"}}"
+  local cmd="$(_ambient_json_escape "$1")"
+  _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":\"${cmd}\",\"cwd\":\"$PWD\"}}"
 }
 
 # precmd: runs after the command finishes, before the next prompt
@@ -85,7 +96,7 @@ _ambient_ai_suggest() {
 
   # Query the daemon synchronously (ZLE widgets block)
   local result
-  result=$("$AMBIENT_BIN" "Convert to a shell command: $input" 2>/dev/null)
+  result=$(eval "$AMBIENT_BIN" "Convert to a shell command: $input" 2>/dev/null)
 
   if [[ -n "$result" ]]; then
     BUFFER="$result"
@@ -98,6 +109,15 @@ _ambient_ai_suggest() {
 
 zle -N _ambient_ai_suggest
 bindkey '\ea' _ambient_ai_suggest  # Alt+A
+
+# --- Override zsh's built-in `r` with ambient ---
+# zsh has a built-in `r` (alias for `fc -e -`). We override it with a function
+# so `r "query"` invokes ambient instead. Functions take precedence over builtins.
+# If you need the original `r` (re-run last command), use `fc -e -` directly.
+disable -a r 2>/dev/null  # disable the built-in alias
+r() {
+  eval "$AMBIENT_BIN" "$@"
+}
 
 # --- Send initial context on shell startup ---
 _ambient_refresh_git

@@ -1,24 +1,52 @@
 #!/usr/bin/env node
 
 import { connect } from "node:net"
-import { spawn, execFileSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { getSocketPath, getPidPath } from "../config.js"
 import type { DaemonRequest, DaemonResponse } from "../types/index.js"
 
-function ensureDaemonRunning(): void {
+function isDaemonAlive(): boolean {
   const pidPath = getPidPath()
+  if (!existsSync(pidPath)) return false
+  const pid = parseInt(readFileSync(pidPath, "utf-8").trim(), 10)
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function waitForSocket(socketPath: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const start = Date.now()
+
+    function tryConnect(): void {
+      if (Date.now() - start > timeoutMs) {
+        resolve() // give up, sendRequest will fail with a clear error
+        return
+      }
+
+      const socket = connect(socketPath)
+      socket.on("connect", () => {
+        socket.end()
+        resolve()
+      })
+      socket.on("error", () => {
+        setTimeout(tryConnect, 100)
+      })
+    }
+
+    tryConnect()
+  })
+}
+
+async function ensureDaemonRunning(): Promise<void> {
   const socketPath = getSocketPath()
 
-  // Check if daemon is already running
-  if (existsSync(pidPath)) {
-    const pid = parseInt(readFileSync(pidPath, "utf-8").trim(), 10)
-    try {
-      process.kill(pid, 0) // signal 0 = check if process exists
-      return // daemon is running
-    } catch {
-      // PID file is stale — daemon is dead
-    }
+  if (isDaemonAlive()) {
+    return
   }
 
   // Start the daemon in the background
@@ -29,11 +57,8 @@ function ensureDaemonRunning(): void {
   })
   child.unref()
 
-  // Wait briefly for the socket to appear
-  const start = Date.now()
-  while (!existsSync(socketPath) && Date.now() - start < 3000) {
-    execFileSync("sleep", ["0.1"])
-  }
+  // Wait for the socket to accept connections (not just exist on disk)
+  await waitForSocket(socketPath, 5000)
 }
 
 function sendRequest(request: DaemonRequest): Promise<void> {
@@ -116,17 +141,44 @@ async function main(): Promise<void> {
       return
     }
     if (args[1] === "status") {
-      ensureDaemonRunning()
+      await ensureDaemonRunning()
       await sendRequest({ type: "status", payload: {} })
       return
     }
     if (args[1] === "start") {
-      ensureDaemonRunning()
+      await ensureDaemonRunning()
       console.log("Daemon running.")
       return
     }
     console.error("Usage: r daemon [start|stop|status]")
     process.exit(1)
+  }
+
+  // Fire-and-forget notification to daemon (used by shell hooks)
+  if (args[0] === "notify") {
+    const json = args.slice(1).join(" ")
+    if (!json) {
+      process.exit(1)
+    }
+    const socketPath = getSocketPath()
+    if (!existsSync(socketPath)) {
+      return // daemon not running, silently skip
+    }
+    try {
+      const socket = connect(socketPath)
+      socket.on("connect", () => {
+        socket.write(json + "\n")
+        socket.end()
+      })
+      socket.on("error", () => {
+        // silently ignore — this is fire-and-forget
+      })
+      // Don't wait for response — exit immediately
+      setTimeout(() => process.exit(0), 200)
+    } catch {
+      // silently ignore
+    }
+    return
   }
 
   if (args[0] === "config") {
@@ -165,7 +217,7 @@ async function main(): Promise<void> {
   const pipeInput = await readStdin()
 
   // Ensure daemon is running
-  ensureDaemonRunning()
+  await ensureDaemonRunning()
 
   // Send query
   const cwd = process.cwd()
