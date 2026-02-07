@@ -1,0 +1,29 @@
+{
+  "name": "ambient",
+  "version": "0.1.0",
+  "description": "An agentic shell layer that makes any coding agent ambient and context-aware",
+  "type": "module",
+  "bin": {
+    "r": "./dist/cli/index.js",
+    "ambient": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start:daemon": "node dist/daemon/index.js",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "private": true,
+  "license": "MIT"
+}
