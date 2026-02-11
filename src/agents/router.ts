@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process"
 import type { AgentConfig, DaemonResponse } from "../types/index.js"
 import { builtinAgents } from "./registry.js"
+import { spawnWithPty, stripPtyArtifacts } from "./pty-spawn.js"
 
 export interface RouteOptions {
   /** Whether to continue the previous session (if the agent supports it) */
@@ -42,7 +42,7 @@ export async function routeToAgent(
   const responseChunks: string[] = []
 
   await new Promise<void>((resolve) => {
-    const child = spawn(config.command, args, {
+    const child = spawnWithPty(config.command, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
     })
@@ -55,15 +55,15 @@ export async function routeToAgent(
 
     options.signal?.addEventListener("abort", cleanup, { once: true })
 
-    child.stdout.on("data", (data: Buffer) => {
-      const text = data.toString()
+    child.stdout?.on("data", (data: Buffer) => {
+      const text = stripPtyArtifacts(data.toString())
       responseChunks.push(text)
       options.onChunk({ type: "chunk", data: text })
     })
 
-    child.stderr.on("data", (data: Buffer) => {
+    child.stderr?.on("data", (data: Buffer) => {
       // Some agents emit progress on stderr — forward it
-      options.onChunk({ type: "chunk", data: data.toString() })
+      options.onChunk({ type: "chunk", data: stripPtyArtifacts(data.toString()) })
     })
 
     child.on("close", (code) => {
