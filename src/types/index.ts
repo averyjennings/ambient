@@ -94,11 +94,23 @@ export interface DaemonResponse {
   readonly data: string
 }
 
+// --- Templates ---
+
+export interface TemplateConfig {
+  /** Shell command to run and pipe as context */
+  readonly command?: string
+  /** Prompt to send to the agent */
+  readonly prompt: string
+  /** Description shown in `r templates` */
+  readonly description?: string
+}
+
 // --- Configuration ---
 
 export interface AmbientConfig {
   readonly defaultAgent: string
   readonly agents: Readonly<Record<string, AgentConfig>>
+  readonly templates: Readonly<Record<string, TemplateConfig>>
   readonly maxRecentCommands: number
   readonly socketPath: string
   readonly logLevel: "debug" | "info" | "warn" | "error"

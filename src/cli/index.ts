@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { connect } from "node:net"
-import { spawn } from "node:child_process"
+import { spawn, execSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
-import { getSocketPath, getPidPath } from "../config.js"
-import type { DaemonRequest, DaemonResponse } from "../types/index.js"
+import { getSocketPath, getPidPath, loadConfig } from "../config.js"
+import type { DaemonRequest, DaemonResponse, TemplateConfig } from "../types/index.js"
 
 function isDaemonAlive(): boolean {
   const pidPath = getPidPath()
@@ -256,6 +256,19 @@ async function main(): Promise<void> {
     return
   }
 
+  // List available templates
+  if (args[0] === "templates") {
+    const config = loadConfig()
+    console.log("\x1b[1mAvailable templates:\x1b[0m\n")
+    for (const [name, tmpl] of Object.entries(config.templates)) {
+      const desc = tmpl.description ?? tmpl.prompt.slice(0, 60)
+      const cmd = tmpl.command ? ` \x1b[90m(runs: ${tmpl.command})\x1b[0m` : ""
+      console.log(`  \x1b[1m${name}\x1b[0m — ${desc}${cmd}`)
+    }
+    console.log("\n\x1b[90mUsage: r <template> [extra args...]\x1b[0m")
+    return
+  }
+
   if (args[0] === "--help" || args[0] === "-h" || args.length === 0) {
     printUsage()
     return
@@ -277,13 +290,40 @@ async function main(): Promise<void> {
     }
   }
 
-  const prompt = queryArgs.join(" ")
+  let prompt = queryArgs.join(" ")
   if (!prompt) {
     printUsage()
     process.exit(1)
   }
 
-  const pipeInput = await readStdin()
+  let pipeInput = await readStdin()
+
+  // --- Template resolution ---
+  // Check if the first word matches a template name
+  const config = loadConfig()
+  const firstWord = queryArgs[0]!
+  const template = config.templates[firstWord] as TemplateConfig | undefined
+  if (template) {
+    const extraArgs = queryArgs.slice(1).join(" ")
+    prompt = extraArgs ? `${template.prompt}\n\n${extraArgs}` : template.prompt
+
+    // Execute template command and use as pipe input
+    if (template.command && !pipeInput) {
+      try {
+        pipeInput = execSync(template.command, {
+          encoding: "utf-8",
+          timeout: 10_000,
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      } catch (err: unknown) {
+        // Command may fail (e.g., no staged changes for git diff --cached)
+        const stderr = err instanceof Error && "stderr" in err ? (err as { stderr: string }).stderr : ""
+        if (stderr) {
+          process.stderr.write(`\x1b[33mTemplate command '${template.command}' warning: ${stderr.trim()}\x1b[0m\n`)
+        }
+      }
+    }
+  }
 
   await ensureDaemonRunning()
 
@@ -317,6 +357,14 @@ function printUsage(): void {
   The agent remembers what you discussed previously.
   r new                              Start a fresh conversation
   r --new <query>                    New conversation with a query
+
+\x1b[1mTemplates:\x1b[0m
+  r review                           Review unstaged changes
+  r commit                           Generate commit message
+  r fix                              Fix the last failed command
+  r test src/auth.ts                 Generate tests for a file
+  r explain src/utils.ts             Explain code
+  r templates                        List all templates
 
 \x1b[1mAgents:\x1b[0m
   r agents                           List available agents
