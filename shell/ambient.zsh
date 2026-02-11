@@ -60,12 +60,27 @@ _ambient_json_escape() {
 
 # --- Auto-assist state ---
 _ambient_last_command=""
+_ambient_handled_by_cnf=0  # flag: command_not_found_handler already responded
+
+# --- command_not_found_handler ---
+# Intercepts "command not found" BEFORE zsh prints its error.
+# Output streams directly to the terminal (no capture), so first
+# tokens from Haiku appear in ~200-300ms.
+command_not_found_handler() {
+  _ambient_handled_by_cnf=1
+  # Print prefix, then stream Haiku response directly to terminal
+  printf '\033[2m\033[33m  ambient → '
+  perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$*" 127 2>/dev/null
+  printf '\033[0m\n'
+  return 127
+}
 
 # --- Hooks ---
 
 # preexec: runs after Enter, before the command executes
 _ambient_preexec() {
   _ambient_last_command="$1"
+  _ambient_handled_by_cnf=0
   local cmd="$(_ambient_json_escape "$1")"
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":\"${cmd}\",\"cwd\":\"$PWD\"}}"
 }
@@ -76,16 +91,13 @@ _ambient_precmd() {
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
 
-  # Auto-assist: when a command fails, call Haiku directly for an instant fix.
-  # Runs synchronously — Haiku responds in ~1s. Timeout at 4s via perl alarm.
-  # Skip: Ctrl+C (130), Ctrl+Z (148), and empty commands
-  if (( exit_code != 0 && exit_code != 130 && exit_code != 148 )) && [[ -n "$_ambient_last_command" ]]; then
+  # Auto-assist for non-127 errors (127 is handled by command_not_found_handler above).
+  # Skip: exit 0 (success), 127 (already handled), 130 (Ctrl+C), 148 (Ctrl+Z)
+  if (( exit_code != 0 && exit_code != 127 && exit_code != 130 && exit_code != 148 )) && [[ -n "$_ambient_last_command" ]]; then
     local escaped_cmd="$(_ambient_json_escape "$_ambient_last_command")"
-    local fix
-    fix=$(perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$escaped_cmd" "$exit_code" 2>/dev/null)
-    if [[ -n "$fix" ]]; then
-      printf '\033[2m\033[33m  ambient → %s\033[0m\n' "$fix"
-    fi
+    printf '\033[2m\033[33m  ambient → '
+    perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$escaped_cmd" "$exit_code" 2>/dev/null
+    printf '\033[0m\n'
   fi
 }
 

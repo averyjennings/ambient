@@ -21,7 +21,7 @@ import type {
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
 import { formatMemoryForPrompt, saveMemory, cleanupStaleMemory } from "../memory/store.js"
-import { callFastLlm } from "../assist/fast-llm.js"
+import { streamFastLlm } from "../assist/fast-llm.js"
 
 const context = new ContextEngine()
 
@@ -341,11 +341,18 @@ async function handleRequest(
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
 
-      const assistPrompt = `The user just ran \`${payload.command}\` in their terminal and it failed with exit code ${payload.exitCode}.${stderrBlock}
+      const assistPrompt = `You are "ambient", an AI assistant that lives in the user's terminal. You can see everything they've been doing.
+
+The user typed: \`${payload.command}\`
+Exit code: ${payload.exitCode}${stderrBlock}
 
 ${contextBlock}${historyBlock}
 
-What went wrong and what's the correct command? Reply in 1-2 short plain text lines. No markdown, no code fences, no explanation — just the fix.`
+Instructions:
+- If the input is NATURAL LANGUAGE (a question, request, or conversation): answer it directly using the terminal context and command history above. DO NOT tell them to run \`history\` — YOU already have their history, so just answer from it.
+- If the input is a MISTYPED COMMAND: suggest the correct command.
+
+Reply in 1-3 short plain text lines. No markdown, no code fences.`
 
       if (!process.env["ANTHROPIC_API_KEY"]) {
         sendResponse(socket, { type: "chunk", data: "Auto-assist requires ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-ant-...` to your ~/.zshrc" })
@@ -355,13 +362,15 @@ What went wrong and what's the correct command? Reply in 1-2 short plain text li
         break
       }
 
-      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via Haiku direct API`)
+      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via Haiku streaming`)
 
-      // Direct API call to Haiku — ~1s vs 3-5s for subprocess spawn
-      const result = await callFastLlm(assistPrompt)
+      // Stream Haiku response — first tokens arrive in ~200-300ms
+      const ok = await streamFastLlm(assistPrompt, (text) => {
+        sendResponse(socket, { type: "chunk", data: text })
+      })
 
-      if (result?.text) {
-        sendResponse(socket, { type: "chunk", data: result.text })
+      if (!ok) {
+        log("warn", "Haiku streaming call failed")
       }
       sendResponse(socket, { type: "done", data: "" })
 

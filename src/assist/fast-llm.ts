@@ -2,8 +2,10 @@
  * Direct LLM call for instant shell assistance.
  *
  * Instead of spawning a full agent CLI as a subprocess (cold start + heavy),
- * this calls the Anthropic API directly using fetch(). Uses Haiku for speed —
- * typical response time is ~800ms vs 3-5s for a subprocess spawn.
+ * this calls the Anthropic API directly using fetch(). Uses Haiku for speed.
+ *
+ * Supports streaming — first tokens arrive in ~200-300ms vs waiting ~1s
+ * for the full response. This makes the assist feel instant.
  *
  * Requires ANTHROPIC_API_KEY in the environment.
  */
@@ -12,17 +14,17 @@ const API_URL = "https://api.anthropic.com/v1/messages"
 const MODEL = "claude-haiku-4-5-20251001"
 const MAX_TOKENS = 200
 
-export interface FastLlmResult {
-  text: string
-}
-
 /**
- * Call Haiku directly for a fast shell-assist response.
- * Returns null if the API key is missing or the call fails.
+ * Stream a Haiku response, calling onChunk for each text token.
+ * First tokens arrive in ~200-300ms. Returns false if the API key
+ * is missing or the call fails.
  */
-export async function callFastLlm(prompt: string): Promise<FastLlmResult | null> {
+export async function streamFastLlm(
+  prompt: string,
+  onChunk: (text: string) => void,
+): Promise<boolean> {
   const apiKey = process.env["ANTHROPIC_API_KEY"]
-  if (!apiKey) return null
+  if (!apiKey) return false
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 5000)
@@ -38,26 +40,48 @@ export async function callFastLlm(prompt: string): Promise<FastLlmResult | null>
       body: JSON.stringify({
         model: MODEL,
         max_tokens: MAX_TOKENS,
+        stream: true,
         messages: [{ role: "user", content: prompt }],
       }),
       signal: controller.signal,
     })
 
-    if (!response.ok) return null
+    if (!response.ok || !response.body) return false
 
-    const data = await response.json() as {
-      content?: Array<{ type: string; text?: string }>
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop() ?? ""
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue
+        const data = line.slice(6)
+        if (data === "[DONE]") return true
+
+        try {
+          const event = JSON.parse(data) as {
+            type?: string
+            delta?: { type?: string; text?: string }
+          }
+          if (event.type === "content_block_delta" && event.delta?.text) {
+            onChunk(event.delta.text)
+          }
+        } catch {
+          // ignore partial JSON
+        }
+      }
     }
 
-    const text = data.content
-      ?.filter(block => block.type === "text")
-      .map(block => block.text ?? "")
-      .join("")
-
-    if (!text) return null
-    return { text }
+    return true
   } catch {
-    return null
+    return false
   } finally {
     clearTimeout(timeout)
   }
