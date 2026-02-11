@@ -339,6 +339,14 @@ ${contextBlock}
 
 What went wrong and what's the correct command? Reply in 1-2 short plain text lines. No markdown, no code fences, no explanation — just the fix.`
 
+      if (!process.env["ANTHROPIC_API_KEY"]) {
+        sendResponse(socket, { type: "chunk", data: "Auto-assist requires ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-ant-...` to your ~/.zshrc" })
+        sendResponse(socket, { type: "done", data: "" })
+        // Only warn once per daemon lifetime
+        lastAssistTime = Infinity
+        break
+      }
+
       log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via Haiku direct API`)
 
       // Direct API call to Haiku — ~1s vs 3-5s for subprocess spawn
