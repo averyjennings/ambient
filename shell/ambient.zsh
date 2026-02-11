@@ -113,6 +113,34 @@ add-zsh-hook preexec _ambient_preexec
 add-zsh-hook precmd _ambient_precmd
 add-zsh-hook chpwd _ambient_chpwd
 
+# --- ZLE widget: intercept natural language with apostrophes ---
+# When the user types something like "what's the status" or "don't do that",
+# the unmatched apostrophe would make zsh wait for a closing quote.
+# We detect mid-word apostrophes (letter'letter) and route to ambient instead.
+_ambient_accept_line() {
+  local buf="$BUFFER"
+  [[ -z "$buf" ]] && { zle .accept-line; return }
+
+  # Check for unmatched single quotes
+  local singles="${buf//[^\']/}"
+  if (( ${#singles} % 2 != 0 )); then
+    # Apostrophe is mid-word (what's, don't, I'm) → natural language
+    # vs at a word boundary (echo 'hello, grep 'pattern) → real command
+    if [[ "$buf" =~ [a-zA-Z]\'[a-zA-Z] ]]; then
+      print
+      printf '\033[2m\033[33m  ambient → '
+      ${=AMBIENT_BIN} assist "$buf" 127 2>/dev/null
+      printf '\033[0m\n'
+      BUFFER=""
+      zle reset-prompt
+      return
+    fi
+  fi
+
+  zle .accept-line
+}
+zle -N accept-line _ambient_accept_line
+
 # --- ZLE widget: Alt+A for inline AI suggestion ---
 _ambient_ai_suggest() {
   local input="$BUFFER"
