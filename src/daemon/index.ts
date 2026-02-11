@@ -240,6 +240,13 @@ async function handleRequest(
       break
     }
 
+    case "suggest": {
+      const suggestion = context.getPendingSuggestion()
+      sendResponse(socket, { type: "status", data: suggestion ?? "" })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
     case "capture": {
       const payload = request.payload as CapturePayload
       context.storeOutput(payload.output)

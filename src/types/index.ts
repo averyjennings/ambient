@@ -72,7 +72,7 @@ export interface CapturePayload {
 }
 
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture"
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest"
   readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | Record<string, never>
 }
 

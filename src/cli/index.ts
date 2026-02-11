@@ -179,6 +179,40 @@ async function main(): Promise<void> {
     return
   }
 
+  // Check for proactive suggestions (called by shell hook)
+  if (args[0] === "suggest") {
+    const socketPath = getSocketPath()
+    if (!existsSync(socketPath)) return
+    try {
+      const socket = connect(socketPath)
+      socket.on("connect", () => {
+        socket.write(JSON.stringify({ type: "suggest", payload: {} }) + "\n")
+      })
+      let buf = ""
+      socket.on("data", (data) => {
+        buf += data.toString()
+        const lines = buf.split("\n")
+        buf = lines.pop() ?? ""
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const response = JSON.parse(line) as DaemonResponse
+          if (response.type === "status" && response.data) {
+            // Output suggestion for the shell hook to display
+            process.stdout.write(response.data)
+          }
+          if (response.type === "done") {
+            socket.end()
+          }
+        }
+      })
+      socket.on("error", () => { /* ignore */ })
+      setTimeout(() => process.exit(0), 200)
+    } catch {
+      // ignore
+    }
+    return
+  }
+
   // Capture command output and store in daemon for context injection
   if (args[0] === "capture") {
     const pipeInput = await readStdin()

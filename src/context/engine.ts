@@ -21,6 +21,10 @@ export class ContextEngine {
   private pendingCommand: string | null = null
   private lastOutput: string | null = null
 
+  // Failure tracking for proactive suggestions
+  private pendingSuggestion: string | null = null
+  private lastSuggestionTime = 0
+
   update(event: ContextUpdatePayload): void {
     this.cwd = event.cwd
 
@@ -53,6 +57,9 @@ export class ContextEngine {
           this.lastCommand = this.pendingCommand
           this.lastExitCode = event.exitCode ?? 0
           this.pendingCommand = null
+
+          // Check for repeated failures to generate proactive suggestions
+          this.checkForRepeatedFailures()
         }
         break
 
@@ -74,6 +81,51 @@ export class ContextEngine {
       projectType: this.projectType,
       projectInfo: this.projectInfo,
       env: {},
+    }
+  }
+
+  /**
+   * Check if there's a pending proactive suggestion.
+   * Returns the suggestion message, or null. Clears the suggestion after reading.
+   */
+  getPendingSuggestion(): string | null {
+    const suggestion = this.pendingSuggestion
+    this.pendingSuggestion = null
+    return suggestion
+  }
+
+  /**
+   * Detect repeated failures of similar commands (same base command
+   * failing 3+ times within 5 minutes). Generates a suggestion if found.
+   */
+  private checkForRepeatedFailures(): void {
+    const FAILURE_THRESHOLD = 3
+    const WINDOW_MS = 5 * 60 * 1000
+    const COOLDOWN_MS = 5 * 60 * 1000
+
+    // Rate-limit suggestions
+    if (Date.now() - this.lastSuggestionTime < COOLDOWN_MS) return
+
+    const now = Date.now()
+    const recentFailures = this.recentCommands.filter(
+      (c) => c.exitCode !== 0 && now - c.timestamp < WINDOW_MS,
+    )
+
+    if (recentFailures.length < FAILURE_THRESHOLD) return
+
+    // Group by base command (first word)
+    const groups = new Map<string, number>()
+    for (const cmd of recentFailures) {
+      const base = cmd.command.split(/\s+/)[0] ?? cmd.command
+      groups.set(base, (groups.get(base) ?? 0) + 1)
+    }
+
+    for (const [base, count] of groups) {
+      if (count >= FAILURE_THRESHOLD) {
+        this.pendingSuggestion = `\`${base}\` has failed ${count} times. Run \`r fix\` to investigate.`
+        this.lastSuggestionTime = now
+        return
+      }
     }
   }
 

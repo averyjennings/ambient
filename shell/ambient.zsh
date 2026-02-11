@@ -71,6 +71,15 @@ _ambient_precmd() {
   local exit_code=$?
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
+
+  # Check for proactive suggestions after failed commands
+  if [[ $exit_code -ne 0 ]]; then
+    local suggestion
+    suggestion=$(${=AMBIENT_BIN} suggest 2>/dev/null)
+    if [[ -n "$suggestion" ]]; then
+      printf '\033[33m%s %s\033[0m\n' "ambient:" "$suggestion"
+    fi
+  fi
 }
 
 # chpwd: runs when the directory changes
