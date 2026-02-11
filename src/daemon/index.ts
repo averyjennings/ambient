@@ -21,6 +21,7 @@ import type {
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
 import { formatMemoryForPrompt, saveMemory, cleanupStaleMemory } from "../memory/store.js"
+import { callFastLlm } from "../assist/fast-llm.js"
 
 const context = new ContextEngine()
 
@@ -317,9 +318,9 @@ async function handleRequest(
         break
       }
 
-      // Rate limit: 1 assist per 10 seconds
+      // Rate limit: 1 assist per 5 seconds
       const now = Date.now()
-      if (now - lastAssistTime < 10_000) {
+      if (now - lastAssistTime < 5_000) {
         sendResponse(socket, { type: "done", data: "" })
         break
       }
@@ -330,33 +331,23 @@ async function handleRequest(
       }
 
       const contextBlock = context.formatForPrompt()
-
-      // Build a tight prompt that asks for a concise fix
       const stderrBlock = payload.stderr ? `\nError output:\n${payload.stderr.slice(-1000)}` : ""
-      const assistPrompt = `The user just ran \`${payload.command}\` and it failed with exit code ${payload.exitCode}.${stderrBlock}
+
+      const assistPrompt = `The user just ran \`${payload.command}\` in their terminal and it failed with exit code ${payload.exitCode}.${stderrBlock}
 
 ${contextBlock}
 
 What went wrong and what's the correct command? Reply in 1-2 short plain text lines. No markdown, no code fences, no explanation — just the fix.`
 
-      // Determine which agent to use
-      const config = loadConfig()
-      const agentName = config.defaultAgent === "auto"
-        ? selectAgent("fix command error", availableAgents, "claude")
-        : config.defaultAgent
+      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via Haiku direct API`)
 
-      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via ${agentName}`)
+      // Direct API call to Haiku — ~1s vs 3-5s for subprocess spawn
+      const result = await callFastLlm(assistPrompt)
 
-      // Route to agent — ephemeral, does NOT update session state
-      await routeToAgent(
-        assistPrompt,
-        agentName,
-        "",  // context already baked into prompt
-        {
-          continueSession: false,
-          onChunk: (response) => sendResponse(socket, response),
-        },
-      )
+      if (result?.text) {
+        sendResponse(socket, { type: "chunk", data: result.text })
+      }
+      sendResponse(socket, { type: "done", data: "" })
 
       break
     }
