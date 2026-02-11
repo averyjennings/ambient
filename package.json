@@ -11,6 +11,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start:daemon": "node dist/daemon/index.js",
+    "reload": "tsc && node dist/cli/index.js daemon stop 2>/dev/null; node dist/cli/index.js daemon start && echo '✓ ambient reloaded. Run: source shell/ambient.zsh (only needed if shell hooks changed)'",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
