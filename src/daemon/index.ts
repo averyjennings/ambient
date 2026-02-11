@@ -2,6 +2,7 @@
 
 import { createServer } from "node:net"
 import { existsSync, unlinkSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import { ContextEngine } from "../context/engine.js"
 import { routeToAgent } from "../agents/router.js"
 import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
@@ -10,6 +11,7 @@ import type {
   ContextUpdatePayload,
   DaemonRequest,
   DaemonResponse,
+  NewSessionPayload,
   QueryPayload,
   SessionState,
 } from "../types/index.js"
@@ -17,8 +19,31 @@ import { loadConfig } from "../config.js"
 
 const context = new ContextEngine()
 
-// Session state — tracks active conversation for continuation
-let session: SessionState | null = null
+// Per-directory session state — keyed by git root or cwd
+const sessions = new Map<string, SessionState>()
+
+// Cache git root lookups to avoid repeated subprocess calls
+const gitRootCache = new Map<string, string>()
+
+function resolveSessionKey(cwd: string): string {
+  if (gitRootCache.has(cwd)) {
+    return gitRootCache.get(cwd)!
+  }
+
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 1000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+    gitRootCache.set(cwd, root)
+    return root
+  } catch {
+    gitRootCache.set(cwd, cwd)
+    return cwd
+  }
+}
 
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
@@ -44,6 +69,8 @@ async function handleRequest(
 
     case "status": {
       const ctx = context.getContext()
+      const sessionKey = resolveSessionKey(ctx.cwd)
+      const currentSession = sessions.get(sessionKey)
       sendResponse(socket, {
         type: "status",
         data: JSON.stringify({
@@ -52,11 +79,12 @@ async function handleRequest(
           recentCommands: ctx.recentCommands.length,
           uptime: process.uptime(),
           pid: process.pid,
-          session: session
+          activeSessions: sessions.size,
+          session: currentSession
             ? {
-                agent: session.agentName,
-                queries: session.queryCount,
-                lastResponseLength: session.lastResponse.length,
+                agent: currentSession.agentName,
+                queries: currentSession.queryCount,
+                lastResponseLength: currentSession.lastResponse.length,
               }
             : null,
           availableAgents,
@@ -74,8 +102,11 @@ async function handleRequest(
     }
 
     case "new-session": {
-      session = null
-      log("info", "Session reset")
+      const payload = request.payload as NewSessionPayload
+      const cwd = payload.cwd ?? context.getContext().cwd
+      const key = resolveSessionKey(cwd)
+      sessions.delete(key)
+      log("info", `Session reset for ${key}`)
       sendResponse(socket, { type: "done", data: "ok" })
       break
     }
@@ -97,8 +128,13 @@ async function handleRequest(
       const config = loadConfig()
       const agentName = payload.agent ?? config.defaultAgent
 
+      // Resolve per-directory session
+      const sessionKey = resolveSessionKey(payload.cwd)
+      let session = sessions.get(sessionKey) ?? null
+
       // If agent changed or --new was passed, reset session
       if (payload.newSession || (session && session.agentName !== agentName)) {
+        sessions.delete(sessionKey)
         session = null
       }
 
@@ -128,7 +164,7 @@ async function handleRequest(
         prompt = `${payload.pipeInput}\n\n---\n\n${prompt}`
       }
 
-      log("info", `Routing to '${agentName}'${shouldContinue ? " (continuing session)" : ""}: ${prompt.slice(0, 100)}...`)
+      log("info", `Routing to '${agentName}' [${sessionKey}]${shouldContinue ? " (continuing)" : ""}: ${prompt.slice(0, 100)}...`)
 
       const result = await routeToAgent(
         prompt,
@@ -145,12 +181,12 @@ async function handleRequest(
         session.queryCount++
         session.lastResponse = result.fullResponse
       } else {
-        session = {
+        sessions.set(sessionKey, {
           agentName,
           queryCount: 1,
           lastResponse: result.fullResponse,
           startedAt: Date.now(),
-        }
+        })
       }
 
       break

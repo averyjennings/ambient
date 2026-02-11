@@ -58,9 +58,13 @@ export interface SessionState {
 
 // --- IPC protocol (daemon <-> CLI) ---
 
+export interface NewSessionPayload {
+  readonly cwd?: string
+}
+
 export interface DaemonRequest {
   readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents"
-  readonly payload: QueryPayload | ContextUpdatePayload | Record<string, never>
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | Record<string, never>
 }
 
 export interface QueryPayload {

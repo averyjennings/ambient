@@ -179,10 +179,10 @@ async function main(): Promise<void> {
     return
   }
 
-  // Start a new conversation (reset session state)
+  // Start a new conversation (reset session state for current directory)
   if (args[0] === "new") {
     await ensureDaemonRunning()
-    await sendRequest({ type: "new-session", payload: {} })
+    await sendRequest({ type: "new-session", payload: { cwd: process.cwd() } })
     console.log("New session started.")
     return
   }
