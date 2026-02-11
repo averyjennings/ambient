@@ -333,10 +333,10 @@ async function handleRequest(
       const contextBlock = context.formatForPrompt()
       const stderrBlock = payload.stderr ? `\nError output:\n${payload.stderr.slice(-1000)}` : ""
 
-      // Include recent command history (last 10, both successes and failures)
+      // Include recent command history (last 20, both successes and failures)
       // so the LLM understands what the user has been doing
       const ctx = context.getContext()
-      const recentHistory = ctx.recentCommands.slice(-10)
+      const recentHistory = ctx.recentCommands.slice(-20)
         .map(c => `  ${c.exitCode === 0 ? "✓" : "✗"} \`${c.command}\`${c.exitCode !== 0 ? ` (exit ${c.exitCode})` : ""}`)
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
