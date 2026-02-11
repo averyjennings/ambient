@@ -58,10 +58,22 @@ _ambient_json_escape() {
   printf '%s' "$s"
 }
 
+# --- Auto-assist state ---
+# Temp file for pending auto-assist response (per-shell-instance)
+_ambient_assist_file="/tmp/ambient-assist-$$"
+_ambient_last_command=""
+
+# Clean up temp file on shell exit
+_ambient_cleanup() {
+  rm -f "$_ambient_assist_file"
+}
+trap '_ambient_cleanup' EXIT
+
 # --- Hooks ---
 
 # preexec: runs after Enter, before the command executes
 _ambient_preexec() {
+  _ambient_last_command="$1"
   local cmd="$(_ambient_json_escape "$1")"
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":\"${cmd}\",\"cwd\":\"$PWD\"}}"
 }
@@ -72,13 +84,21 @@ _ambient_precmd() {
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
 
-  # Check for proactive suggestions after failed commands
-  if [[ $exit_code -ne 0 ]]; then
-    local suggestion
-    suggestion=$(${=AMBIENT_BIN} suggest 2>/dev/null)
-    if [[ -n "$suggestion" ]]; then
-      printf '\033[33m%s %s\033[0m\n' "ambient:" "$suggestion"
+  # Display pending auto-assist from a PREVIOUS failed command
+  if [[ -s "$_ambient_assist_file" ]]; then
+    local fix
+    fix=$(<"$_ambient_assist_file")
+    if [[ -n "$fix" ]]; then
+      printf '\n\033[2m\033[33m  ambient → %s\033[0m\n\n' "$fix"
     fi
+    : > "$_ambient_assist_file"  # clear after displaying
+  fi
+
+  # If this command failed, request auto-assist in background
+  # Skip: Ctrl+C (130), Ctrl+Z (148), and empty commands
+  if (( exit_code != 0 && exit_code != 130 && exit_code != 148 )) && [[ -n "$_ambient_last_command" ]]; then
+    local escaped_cmd="$(_ambient_json_escape "$_ambient_last_command")"
+    (${=AMBIENT_BIN} assist "$escaped_cmd" "$exit_code" > "$_ambient_assist_file" 2>/dev/null &)
   fi
 }
 

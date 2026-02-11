@@ -9,6 +9,7 @@ import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
 import { selectAgent } from "../agents/selector.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
+  AssistPayload,
   CapturePayload,
   ComparePayload,
   ContextUpdatePayload,
@@ -28,6 +29,9 @@ const sessions = new Map<string, SessionState>()
 
 // Cache git root lookups to avoid repeated subprocess calls
 const gitRootCache = new Map<string, string>()
+
+// Rate-limit auto-assist (1 per 10 seconds)
+let lastAssistTime = 0
 
 function resolveSessionKey(cwd: string): string {
   if (gitRootCache.has(cwd)) {
@@ -301,6 +305,59 @@ async function handleRequest(
       context.storeOutput(payload.output)
       log("info", `Captured ${payload.output.length} chars of command output`)
       sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
+    case "assist": {
+      const payload = request.payload as AssistPayload
+
+      // Skip intentional signals (Ctrl+C = 130, Ctrl+Z = 148)
+      if (payload.exitCode === 130 || payload.exitCode === 148) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
+      // Rate limit: 1 assist per 10 seconds
+      const now = Date.now()
+      if (now - lastAssistTime < 10_000) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+      lastAssistTime = now
+
+      if (payload.cwd) {
+        context.update({ event: "chpwd", cwd: payload.cwd })
+      }
+
+      const contextBlock = context.formatForPrompt()
+
+      // Build a tight prompt that asks for a concise fix
+      const stderrBlock = payload.stderr ? `\nError output:\n${payload.stderr.slice(-1000)}` : ""
+      const assistPrompt = `The user just ran \`${payload.command}\` and it failed with exit code ${payload.exitCode}.${stderrBlock}
+
+${contextBlock}
+
+What went wrong and what's the correct command? Reply in 1-2 short plain text lines. No markdown, no code fences, no explanation — just the fix.`
+
+      // Determine which agent to use
+      const config = loadConfig()
+      const agentName = config.defaultAgent === "auto"
+        ? selectAgent("fix command error", availableAgents, "claude")
+        : config.defaultAgent
+
+      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via ${agentName}`)
+
+      // Route to agent — ephemeral, does NOT update session state
+      await routeToAgent(
+        assistPrompt,
+        agentName,
+        "",  // context already baked into prompt
+        {
+          continueSession: false,
+          onChunk: (response) => sendResponse(socket, response),
+        },
+      )
+
       break
     }
 

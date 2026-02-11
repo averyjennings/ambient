@@ -390,6 +390,29 @@ async function main(): Promise<void> {
     return
   }
 
+  // Auto-assist: called by shell hook when a command fails
+  // Usage: r assist <command> <exit-code> [stderr]
+  if (args[0] === "assist") {
+    const failedCommand = args[1]
+    const exitCode = parseInt(args[2] ?? "1", 10)
+    if (!failedCommand) return
+
+    // Try to read stderr from stdin if piped
+    const stderrInput = await readStdin()
+
+    await ensureDaemonRunning()
+    await sendRequest({
+      type: "assist",
+      payload: {
+        command: failedCommand,
+        exitCode,
+        cwd: process.cwd(),
+        stderr: stderrInput,
+      },
+    })
+    return
+  }
+
   if (args[0] === "--help" || args[0] === "-h" || args.length === 0) {
     printUsage()
     return

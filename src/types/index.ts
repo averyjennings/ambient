@@ -78,9 +78,20 @@ export interface ComparePayload {
   readonly cwd: string
 }
 
+export interface AssistPayload {
+  /** The command that failed */
+  readonly command: string
+  /** The exit code */
+  readonly exitCode: number
+  /** Current working directory */
+  readonly cwd: string
+  /** Captured stderr/output (optional, may be empty) */
+  readonly stderr?: string
+}
+
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare"
-  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | Record<string, never>
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist"
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | Record<string, never>
 }
 
 export interface QueryPayload {
