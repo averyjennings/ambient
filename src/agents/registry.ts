@@ -20,17 +20,19 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "Anthropic Claude Code",
+    capabilities: ["code-edit", "reasoning", "code-review", "explain"],
+    priority: 10,
   },
 
   codex: {
     name: "codex",
     command: "codex",
     args: ["exec"],
-    // codex supports: codex exec resume --last "prompt"
-    // but the flag structure is different — handled specially in router
     streamFormat: "json-lines",
     contextInjection: "prompt-prefix",
     description: "OpenAI Codex CLI",
+    capabilities: ["code-edit", "fast"],
+    priority: 8,
   },
 
   gemini: {
@@ -40,6 +42,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "Google Gemini CLI",
+    capabilities: ["reasoning", "explain", "fast"],
+    priority: 7,
   },
 
   goose: {
@@ -49,6 +53,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "Block Goose",
+    capabilities: ["code-edit", "reasoning"],
+    priority: 6,
   },
 
   aider: {
@@ -58,6 +64,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "Aider (open source)",
+    capabilities: ["code-edit"],
+    priority: 5,
   },
 
   copilot: {
@@ -67,6 +75,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "GitHub Copilot CLI",
+    capabilities: ["code-edit", "fast"],
+    priority: 5,
   },
 
   opencode: {
@@ -77,6 +87,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "OpenCode",
+    capabilities: ["code-edit", "reasoning"],
+    priority: 5,
   },
 
   gptme: {
@@ -86,6 +98,8 @@ export const builtinAgents: Readonly<Record<string, AgentConfig>> = {
     streamFormat: "text",
     contextInjection: "prompt-prefix",
     description: "gptme",
+    capabilities: ["code-edit"],
+    priority: 4,
   },
 }
 

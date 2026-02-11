@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process"
 import { ContextEngine } from "../context/engine.js"
 import { routeToAgent } from "../agents/router.js"
 import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
+import { selectAgent } from "../agents/selector.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
   CapturePayload,
@@ -153,7 +154,16 @@ async function handleRequest(
     case "query": {
       const payload = request.payload as QueryPayload
       const config = loadConfig()
-      const agentName = payload.agent ?? config.defaultAgent
+
+      // Agent selection: explicit > auto-select > default
+      let agentName: string
+      if (payload.agent) {
+        agentName = payload.agent
+      } else if (config.defaultAgent === "auto") {
+        agentName = selectAgent(payload.prompt, availableAgents, "claude")
+      } else {
+        agentName = config.defaultAgent
+      }
 
       // Resolve per-directory session
       const sessionKey = resolveSessionKey(payload.cwd)

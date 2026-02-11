@@ -13,6 +13,10 @@ export interface AgentConfig {
   readonly description?: string
   /** Args to append for continuing the last session (e.g. ["--continue"]) */
   readonly continueArgs?: readonly string[]
+  /** Capability tags for auto-selection */
+  readonly capabilities?: readonly string[]
+  /** Priority when multiple agents match (higher = preferred) */
+  readonly priority?: number
 }
 
 // --- Context ---
