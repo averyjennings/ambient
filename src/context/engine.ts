@@ -19,6 +19,7 @@ export class ContextEngine {
   private projectType: string | null = null
   private projectInfo: ProjectInfo | null = null
   private pendingCommand: string | null = null
+  private lastOutput: string | null = null
 
   update(event: ContextUpdatePayload): void {
     this.cwd = event.cwd
@@ -74,6 +75,17 @@ export class ContextEngine {
       projectInfo: this.projectInfo,
       env: {},
     }
+  }
+
+  /**
+   * Store captured command output (from `r capture` or shell hook).
+   * Output is cleared after it's been consumed by formatForPrompt().
+   */
+  storeOutput(output: string): void {
+    const MAX_OUTPUT_LENGTH = 4000
+    this.lastOutput = output.length > MAX_OUTPUT_LENGTH
+      ? output.slice(-MAX_OUTPUT_LENGTH)
+      : output
   }
 
   /**
@@ -248,6 +260,16 @@ export class ContextEngine {
     if (this.lastCommand) {
       const status = this.lastExitCode === 0 ? "success" : `failed (exit ${this.lastExitCode})`
       lines.push(`Last command: \`${this.lastCommand}\` → ${status}`)
+    }
+
+    // Include captured output when the last command failed
+    if (this.lastOutput && this.lastExitCode !== 0) {
+      const outputLines = this.lastOutput.trimEnd().split("\n")
+      const tail = outputLines.slice(-30).join("\n")
+      lines.push(`Error output (last ${Math.min(outputLines.length, 30)} lines):`)
+      lines.push(tail)
+      // Clear after consumption so it's only injected once
+      this.lastOutput = null
     }
 
     const recentFailed = this.recentCommands

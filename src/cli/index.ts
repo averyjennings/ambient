@@ -179,6 +179,23 @@ async function main(): Promise<void> {
     return
   }
 
+  // Capture command output and store in daemon for context injection
+  if (args[0] === "capture") {
+    const pipeInput = await readStdin()
+    if (!pipeInput) {
+      console.error("Usage: command 2>&1 | r capture")
+      process.exit(1)
+    }
+    await ensureDaemonRunning()
+    await sendRequest({
+      type: "capture",
+      payload: { output: pipeInput, cwd: process.cwd() },
+    })
+    // Also write the captured output to stdout so piping is transparent
+    process.stdout.write(pipeInput)
+    return
+  }
+
   // Start a new conversation (reset session state for current directory)
   if (args[0] === "new") {
     await ensureDaemonRunning()
@@ -293,6 +310,7 @@ function printUsage(): void {
   r -a claude <query>                Short form
   r --new <query>                    Start a new conversation
   cat file | r "explain this"        Pipe input as context
+  rc pnpm build                      Run command and capture output on failure
 
 \x1b[1mConversation:\x1b[0m
   Queries automatically continue the current session.

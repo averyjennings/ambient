@@ -8,6 +8,7 @@ import { routeToAgent } from "../agents/router.js"
 import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
+  CapturePayload,
   ContextUpdatePayload,
   DaemonRequest,
   DaemonResponse,
@@ -189,6 +190,14 @@ async function handleRequest(
         })
       }
 
+      break
+    }
+
+    case "capture": {
+      const payload = request.payload as CapturePayload
+      context.storeOutput(payload.output)
+      log("info", `Captured ${payload.output.length} chars of command output`)
+      sendResponse(socket, { type: "done", data: "ok" })
       break
     }
 

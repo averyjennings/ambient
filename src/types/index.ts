@@ -62,9 +62,14 @@ export interface NewSessionPayload {
   readonly cwd?: string
 }
 
+export interface CapturePayload {
+  readonly output: string
+  readonly cwd: string
+}
+
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents"
-  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | Record<string, never>
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture"
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | Record<string, never>
 }
 
 export interface QueryPayload {

@@ -111,6 +111,23 @@ _ambient_ai_suggest() {
 zle -N _ambient_ai_suggest
 bindkey '\ea' _ambient_ai_suggest  # Alt+A
 
+# --- Capture wrapper: runs a command and stores output for context ---
+# Usage: rc pnpm build
+# The output is captured and sent to the daemon, so the next `r "fix this"`
+# query will include the error output automatically.
+rc() {
+  local capture_file
+  capture_file=$(mktemp /tmp/ambient-capture.XXXXXX)
+  "$@" 2>&1 | tee "$capture_file"
+  local exit_code=${pipestatus[1]}
+  if [[ $exit_code -ne 0 ]]; then
+    # Only capture on failure — success output is rarely useful for context
+    ${=AMBIENT_BIN} capture < "$capture_file" &>/dev/null &
+  fi
+  rm -f "$capture_file"
+  return $exit_code
+}
+
 # --- Override zsh's built-in `r` with ambient ---
 # zsh has a built-in `r` (alias for `fc -e -`). We override it with a function
 # so `r "query"` invokes ambient instead. Functions take precedence over builtins.
