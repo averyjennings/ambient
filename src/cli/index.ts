@@ -290,6 +290,41 @@ async function main(): Promise<void> {
     return
   }
 
+  // Compare: run multiple agents in parallel on the same query
+  if (args[0] === "compare") {
+    const compareArgs = args.slice(1)
+    let agents: string[] = []
+    const promptParts: string[] = []
+
+    for (let i = 0; i < compareArgs.length; i++) {
+      if ((compareArgs[i] === "--agents" || compareArgs[i] === "-a") && compareArgs[i + 1]) {
+        agents = compareArgs[i + 1]!.split(",")
+        i++
+      } else {
+        promptParts.push(compareArgs[i]!)
+      }
+    }
+
+    const comparePrompt = promptParts.join(" ")
+    if (!comparePrompt) {
+      console.error("Usage: r compare [-a agent1,agent2] \"your query\"")
+      process.exit(1)
+    }
+
+    // Default to comparing all installed agents if none specified
+    if (agents.length === 0) {
+      agents = ["claude", "gemini", "codex"]
+    }
+
+    const pipeInput = await readStdin()
+    await ensureDaemonRunning()
+    await sendRequest({
+      type: "compare",
+      payload: { prompt: comparePrompt, agents, pipeInput, cwd: process.cwd() },
+    })
+    return
+  }
+
   // List available templates
   if (args[0] === "templates") {
     const config = loadConfig()
@@ -403,6 +438,7 @@ function printUsage(): void {
 \x1b[1mAgents:\x1b[0m
   r agents                           List available agents
   r -a codex <query>                 Use a specific agent
+  r compare -a claude,gemini <query> Compare responses from multiple agents
 
 \x1b[1mDaemon:\x1b[0m
   r daemon start                     Start the background daemon

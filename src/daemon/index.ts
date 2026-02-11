@@ -10,6 +10,7 @@ import { selectAgent } from "../agents/selector.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
   CapturePayload,
+  ComparePayload,
   ContextUpdatePayload,
   DaemonRequest,
   DaemonResponse,
@@ -237,6 +238,54 @@ async function handleRequest(
         })
       }
 
+      break
+    }
+
+    case "compare": {
+      const payload = request.payload as ComparePayload
+      const agentNames = payload.agents.filter((a) => availableAgents.includes(a))
+
+      if (agentNames.length === 0) {
+        sendResponse(socket, { type: "error", data: `None of the specified agents are installed: ${payload.agents.join(", ")}` })
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
+      if (payload.cwd) {
+        context.update({ event: "chpwd", cwd: payload.cwd })
+      }
+
+      const contextBlock = context.formatForPrompt()
+      let prompt = payload.prompt
+      if (payload.pipeInput) {
+        prompt = `${payload.pipeInput}\n\n---\n\n${prompt}`
+      }
+
+      log("info", `Comparing agents: ${agentNames.join(", ")} — ${prompt.slice(0, 80)}...`)
+
+      // Run all agents in parallel, collect full responses
+      const results = await Promise.all(
+        agentNames.map(async (name) => {
+          const chunks: string[] = []
+          await routeToAgent(prompt, name, contextBlock, {
+            continueSession: false,
+            onChunk: (response) => {
+              if (response.type === "chunk") chunks.push(response.data)
+            },
+          })
+          return { name, response: chunks.join("") }
+        }),
+      )
+
+      // Display results with agent headers
+      for (const result of results) {
+        const header = `\n\x1b[1m\x1b[36m━━━ ${result.name} ━━━\x1b[0m\n`
+        sendResponse(socket, { type: "chunk", data: header })
+        sendResponse(socket, { type: "chunk", data: result.response })
+        sendResponse(socket, { type: "chunk", data: "\n" })
+      }
+
+      sendResponse(socket, { type: "done", data: "" })
       break
     }
 
