@@ -17,6 +17,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
+import { formatMemoryForPrompt, saveMemory, cleanupStaleMemory } from "../memory/store.js"
 
 const context = new ContextEngine()
 
@@ -48,6 +49,27 @@ function resolveSessionKey(cwd: string): string {
 
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
+
+/**
+ * Save a session's last response as persistent memory for the directory.
+ * Uses the last response truncated as a summary (a proper summarization
+ * step could be added later by querying the agent).
+ */
+function persistSessionMemory(directory: string, session: SessionState): void {
+  if (!session.lastResponse || session.queryCount < 1) return
+
+  // Use the first 500 chars of the last response as a rough summary
+  const summary = session.lastResponse.slice(0, 500).trimEnd()
+
+  saveMemory({
+    directory,
+    lastAgent: session.agentName,
+    lastActive: Date.now(),
+    summary,
+    facts: [],
+  })
+  log("info", `Saved memory for ${directory}`)
+}
 
 function log(level: string, msg: string): void {
   const ts = new Date().toISOString()
@@ -106,6 +128,10 @@ async function handleRequest(
       const payload = request.payload as NewSessionPayload
       const cwd = payload.cwd ?? context.getContext().cwd
       const key = resolveSessionKey(cwd)
+      const existingSession = sessions.get(key)
+      if (existingSession) {
+        persistSessionMemory(key, existingSession)
+      }
       sessions.delete(key)
       log("info", `Session reset for ${key}`)
       sendResponse(socket, { type: "done", data: "ok" })
@@ -133,8 +159,11 @@ async function handleRequest(
       const sessionKey = resolveSessionKey(payload.cwd)
       let session = sessions.get(sessionKey) ?? null
 
-      // If agent changed or --new was passed, reset session
+      // If agent changed or --new was passed, save memory and reset session
       if (payload.newSession || (session && session.agentName !== agentName)) {
+        if (session) {
+          persistSessionMemory(sessionKey, session)
+        }
         sessions.delete(sessionKey)
         session = null
       }
@@ -151,6 +180,14 @@ async function handleRequest(
       // injected on the first message. For others, include last response as context.
       const agentConfig = builtinAgents[agentName]
       let contextBlock = context.formatForPrompt()
+
+      // Inject persistent memory for new sessions (first query in this directory)
+      if (!shouldContinue) {
+        const memoryBlock = formatMemoryForPrompt(sessionKey)
+        if (memoryBlock) {
+          contextBlock += `\n\n${memoryBlock}`
+        }
+      }
 
       // For agents WITHOUT native continuation, inject last response as pseudo-memory
       if (shouldContinue && !agentConfig?.continueArgs && session?.lastResponse) {
@@ -216,6 +253,9 @@ async function startDaemon(): Promise<void> {
   availableAgents = await detectAvailableAgents()
   log("info", `Available agents: ${availableAgents.join(", ") || "none detected"}`)
 
+  // Clean up stale memory files
+  cleanupStaleMemory()
+
   // Clean up stale socket
   if (existsSync(socketPath)) {
     try {
@@ -266,6 +306,10 @@ async function startDaemon(): Promise<void> {
   // Graceful shutdown
   const shutdown = (): void => {
     log("info", "Shutting down...")
+    // Persist all active sessions to memory before exit
+    for (const [key, session] of sessions) {
+      persistSessionMemory(key, session)
+    }
     server.close()
     try {
       unlinkSync(socketPath)
