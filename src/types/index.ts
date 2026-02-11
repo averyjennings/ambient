@@ -17,6 +17,13 @@ export interface AgentConfig {
 
 // --- Context ---
 
+export interface ProjectInfo {
+  readonly type: string
+  readonly packageManager?: string
+  readonly scripts: readonly string[]
+  readonly framework?: string
+}
+
 export interface ShellContext {
   readonly cwd: string
   readonly gitBranch: string | null
@@ -25,6 +32,7 @@ export interface ShellContext {
   readonly lastExitCode: number | null
   readonly recentCommands: readonly CommandRecord[]
   readonly projectType: string | null
+  readonly projectInfo: ProjectInfo | null
   readonly env: Readonly<Record<string, string>>
 }
 

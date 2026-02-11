@@ -1,4 +1,6 @@
-import type { CommandRecord, ContextUpdatePayload, ShellContext } from "../types/index.js"
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
+import type { CommandRecord, ContextUpdatePayload, ProjectInfo, ShellContext } from "../types/index.js"
 
 const MAX_RECENT_COMMANDS = 50
 
@@ -15,6 +17,7 @@ export class ContextEngine {
   private lastExitCode: number | null = null
   private recentCommands: CommandRecord[] = []
   private projectType: string | null = null
+  private projectInfo: ProjectInfo | null = null
   private pendingCommand: string | null = null
 
   update(event: ContextUpdatePayload): void {
@@ -54,7 +57,7 @@ export class ContextEngine {
 
       case "chpwd":
         this.cwd = event.cwd
-        this.projectType = null // reset — will be re-detected
+        this.detectProject()
         break
     }
   }
@@ -68,8 +71,155 @@ export class ContextEngine {
       lastExitCode: this.lastExitCode,
       recentCommands: [...this.recentCommands],
       projectType: this.projectType,
+      projectInfo: this.projectInfo,
       env: {},
     }
+  }
+
+  /**
+   * Detect project type and metadata from marker files in the current directory.
+   */
+  private detectProject(): void {
+    this.projectType = null
+    this.projectInfo = null
+
+    const cwd = this.cwd
+
+    if (existsSync(join(cwd, "package.json"))) {
+      this.projectType = "node"
+      this.projectInfo = this.detectNodeProject(cwd)
+    } else if (existsSync(join(cwd, "Cargo.toml"))) {
+      this.projectType = "rust"
+      this.projectInfo = { type: "rust", scripts: this.extractCargoScripts(cwd) }
+    } else if (existsSync(join(cwd, "go.mod"))) {
+      this.projectType = "go"
+      this.projectInfo = { type: "go", scripts: this.extractGoScripts(cwd) }
+    } else if (existsSync(join(cwd, "pyproject.toml"))) {
+      this.projectType = "python"
+      this.projectInfo = { type: "python", scripts: this.extractPythonScripts(cwd) }
+    } else if (existsSync(join(cwd, "deno.json")) || existsSync(join(cwd, "deno.jsonc"))) {
+      this.projectType = "deno"
+      this.projectInfo = this.detectDenoProject(cwd)
+    } else if (existsSync(join(cwd, "Makefile"))) {
+      this.projectType = "make"
+      this.projectInfo = { type: "make", scripts: this.extractMakeTargets(cwd) }
+    } else if (existsSync(join(cwd, "build.gradle")) || existsSync(join(cwd, "build.gradle.kts"))) {
+      this.projectType = "java"
+      this.projectInfo = { type: "java", scripts: ["build", "test", "run"] }
+    } else if (existsSync(join(cwd, "mix.exs"))) {
+      this.projectType = "elixir"
+      this.projectInfo = { type: "elixir", scripts: ["mix compile", "mix test", "mix run"] }
+    }
+  }
+
+  private detectNodeProject(cwd: string): ProjectInfo {
+    const scripts: string[] = []
+    let packageManager: string | undefined
+    let framework: string | undefined
+
+    try {
+      const raw = readFileSync(join(cwd, "package.json"), "utf-8")
+      const pkg = JSON.parse(raw) as Record<string, unknown>
+
+      const pkgScripts = pkg["scripts"] as Record<string, string> | undefined
+      if (pkgScripts) {
+        scripts.push(...Object.keys(pkgScripts))
+      }
+
+      const deps = {
+        ...(pkg["dependencies"] as Record<string, string> | undefined),
+        ...(pkg["devDependencies"] as Record<string, string> | undefined),
+      }
+      if (deps["next"]) framework = "next"
+      else if (deps["nuxt"]) framework = "nuxt"
+      else if (deps["remix"]) framework = "remix"
+      else if (deps["react"]) framework = "react"
+      else if (deps["vue"]) framework = "vue"
+      else if (deps["svelte"]) framework = "svelte"
+      else if (deps["express"]) framework = "express"
+    } catch {
+      // ignore parse errors
+    }
+
+    if (existsSync(join(cwd, "pnpm-lock.yaml"))) packageManager = "pnpm"
+    else if (existsSync(join(cwd, "yarn.lock"))) packageManager = "yarn"
+    else if (existsSync(join(cwd, "bun.lockb")) || existsSync(join(cwd, "bun.lock"))) packageManager = "bun"
+    else packageManager = "npm"
+
+    return { type: "node", packageManager, scripts, framework }
+  }
+
+  private detectDenoProject(cwd: string): ProjectInfo {
+    const scripts: string[] = []
+    const configFile = existsSync(join(cwd, "deno.json")) ? "deno.json" : "deno.jsonc"
+    try {
+      const raw = readFileSync(join(cwd, configFile), "utf-8")
+      const config = JSON.parse(raw) as Record<string, unknown>
+      const tasks = config["tasks"] as Record<string, string> | undefined
+      if (tasks) scripts.push(...Object.keys(tasks))
+    } catch {
+      // ignore
+    }
+    return { type: "deno", scripts }
+  }
+
+  private extractCargoScripts(cwd: string): string[] {
+    const scripts = ["build", "test", "run", "check", "clippy"]
+    // Check for workspace
+    try {
+      const raw = readFileSync(join(cwd, "Cargo.toml"), "utf-8")
+      if (raw.includes("[workspace]")) {
+        scripts.push("workspace")
+      }
+    } catch {
+      // ignore
+    }
+    return scripts
+  }
+
+  private extractGoScripts(cwd: string): string[] {
+    const scripts = ["build", "test", "run", "vet"]
+    if (existsSync(join(cwd, "Makefile"))) {
+      scripts.push(...this.extractMakeTargets(cwd))
+    }
+    return scripts
+  }
+
+  private extractPythonScripts(cwd: string): string[] {
+    const scripts: string[] = []
+    try {
+      const raw = readFileSync(join(cwd, "pyproject.toml"), "utf-8")
+      // Simple extraction of [tool.poetry.scripts] or [project.scripts] keys
+      const scriptSection = raw.match(/\[(?:tool\.poetry\.scripts|project\.scripts)\]\s*\n((?:[^\[]*\n)*)/)?.[1]
+      if (scriptSection) {
+        const keys = scriptSection.match(/^(\w[\w-]*)\s*=/gm)
+        if (keys) {
+          scripts.push(...keys.map(k => k.replace(/\s*=.*/, "")))
+        }
+      }
+    } catch {
+      // ignore
+    }
+    if (existsSync(join(cwd, "Makefile"))) {
+      scripts.push(...this.extractMakeTargets(cwd))
+    }
+    return scripts
+  }
+
+  private extractMakeTargets(cwd: string): string[] {
+    try {
+      const raw = readFileSync(join(cwd, "Makefile"), "utf-8")
+      const targets = raw.match(/^([a-zA-Z_][\w-]*)\s*:/gm)
+      if (targets) {
+        return targets
+          .map(t => t.replace(/:.*/, ""))
+          .filter(t => !t.startsWith("_") && !t.startsWith("."))
+          .slice(0, 20) // cap to avoid noise
+      }
+    } catch {
+      // ignore
+    }
+    return []
   }
 
   /**
@@ -82,6 +232,17 @@ export class ContextEngine {
 
     if (this.gitBranch) {
       lines.push(`Git branch: ${this.gitBranch}${this.gitDirty ? " (dirty)" : ""}`)
+    }
+
+    if (this.projectInfo) {
+      const pm = this.projectInfo.packageManager ? ` (${this.projectInfo.packageManager})` : ""
+      const fw = this.projectInfo.framework ? `, ${this.projectInfo.framework}` : ""
+      const scripts = this.projectInfo.scripts.length > 0
+        ? ` — scripts: ${this.projectInfo.scripts.slice(0, 10).join(", ")}${this.projectInfo.scripts.length > 10 ? "…" : ""}`
+        : ""
+      lines.push(`Project: ${this.projectInfo.type}${pm}${fw}${scripts}`)
+    } else if (this.projectType) {
+      lines.push(`Project type: ${this.projectType}`)
     }
 
     if (this.lastCommand) {
@@ -97,10 +258,6 @@ export class ContextEngine {
       for (const cmd of recentFailed) {
         lines.push(`  - \`${cmd.command}\` → exit ${cmd.exitCode}`)
       }
-    }
-
-    if (this.projectType) {
-      lines.push(`Project type: ${this.projectType}`)
     }
 
     return lines.join("\n")
