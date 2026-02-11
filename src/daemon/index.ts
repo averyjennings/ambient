@@ -333,9 +333,17 @@ async function handleRequest(
       const contextBlock = context.formatForPrompt()
       const stderrBlock = payload.stderr ? `\nError output:\n${payload.stderr.slice(-1000)}` : ""
 
+      // Include recent command history (last 10, both successes and failures)
+      // so the LLM understands what the user has been doing
+      const ctx = context.getContext()
+      const recentHistory = ctx.recentCommands.slice(-10)
+        .map(c => `  ${c.exitCode === 0 ? "✓" : "✗"} \`${c.command}\`${c.exitCode !== 0 ? ` (exit ${c.exitCode})` : ""}`)
+        .join("\n")
+      const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
+
       const assistPrompt = `The user just ran \`${payload.command}\` in their terminal and it failed with exit code ${payload.exitCode}.${stderrBlock}
 
-${contextBlock}
+${contextBlock}${historyBlock}
 
 What went wrong and what's the correct command? Reply in 1-2 short plain text lines. No markdown, no code fences, no explanation — just the fix.`
 
