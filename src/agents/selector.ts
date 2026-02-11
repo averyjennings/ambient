@@ -53,7 +53,9 @@ export function selectAgent(
   // If no signals detected, fall back to default
   if (capabilityScores.size === 0) return defaultAgent
 
-  // Score each installed agent
+  // Score each installed agent.
+  // Use matched-capability ratio so specialists beat generalists
+  // when the query clearly targets a specific capability.
   let bestAgent = defaultAgent
   let bestScore = -1
 
@@ -61,13 +63,21 @@ export function selectAgent(
     const config = builtinAgents[name]
     if (!config?.capabilities) continue
 
-    let score = 0
+    let matchedScore = 0
+    let matchedCaps = 0
     for (const cap of config.capabilities) {
-      score += capabilityScores.get(cap) ?? 0
+      const capScore = capabilityScores.get(cap) ?? 0
+      if (capScore > 0) {
+        matchedScore += capScore
+        matchedCaps++
+      }
     }
 
-    // Weight by agent priority
-    score += (config.priority ?? 0) * 0.1
+    // Specialization bonus: agents where a higher proportion of
+    // capabilities matched the query are preferred over generalists
+    const totalCaps = config.capabilities.length
+    const specializationRatio = totalCaps > 0 ? matchedCaps / totalCaps : 0
+    const score = matchedScore + specializationRatio * 0.5 + (config.priority ?? 0) * 0.01
 
     if (score > bestScore) {
       bestScore = score
