@@ -124,6 +124,12 @@ function buildEnrichedPrompt(
   return `[Ambient Shell Context — you have access to persistent memory and terminal state]
 ${contextBlock}
 
+[Storing memories]
+To persist important decisions, task updates, or error resolutions across sessions, run:
+  ambient remember "description of what to remember"
+  ambient remember --type task-update "what you're working on"
+  ambient remember --type error-resolution "error and how it was fixed"
+
 [Task]
 ${userPrompt}`
 }
