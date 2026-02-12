@@ -226,7 +226,7 @@ const STOP_WORDS = new Set([
   "still", "such", "take", "tell", "through", "to", "up", "us", "use",
   "want", "way", "well", "were", "with", "yes", "yet",
   "remember", "memories", "memory", "everything", "anything", "something",
-  "hey", "hi", "hello", "please", "thanks", "ambient",
+  "hey", "hi", "hello", "please", "thanks",
 ])
 
 /**
@@ -240,20 +240,59 @@ function extractKeywords(input: string): string[] {
     .filter(w => w.length > 2 && !STOP_WORDS.has(w))
 }
 
+// --- TF-IDF scoring ---
+
+interface ScoredEvent {
+  event: MemoryEvent
+  source: string
+  searchText: string
+  score: number
+  _recency: number
+  _tfidf: number
+}
+
 /**
- * Score a memory event against search keywords.
- * Returns 0 if no match, higher = more relevant.
+ * Compute IDF (inverse document frequency) for each keyword across a corpus.
+ * Uses smoothed IDF: log((1 + N) / (1 + df)) to handle small corpora.
+ * Ensures even terms appearing in all documents get a small positive weight.
  */
-function scoreEvent(event: MemoryEvent, keywords: string[]): number {
+function computeIdf(searchTexts: string[], keywords: string[]): Map<string, number> {
+  const idf = new Map<string, number>()
+  const n = searchTexts.length
+
+  for (const kw of keywords) {
+    let df = 0
+    for (const text of searchTexts) {
+      if (text.includes(kw)) df++
+    }
+    idf.set(kw, Math.log((1 + n) / (1 + df)))
+  }
+
+  return idf
+}
+
+/**
+ * Score an event using TF-IDF against search keywords.
+ * searchText should include projectName + branchName + event.content.
+ */
+function scoreTfIdf(searchText: string, keywords: string[], idfMap: Map<string, number>): number {
   if (keywords.length === 0) return 0
-  const content = event.content.toLowerCase()
   let score = 0
   for (const kw of keywords) {
-    if (content.includes(kw)) score += 1
+    if (searchText.includes(kw)) {
+      score += idfMap.get(kw) ?? 0
+    }
   }
-  // Boost high-importance events
-  if (event.importance === "high") score *= 1.5
   return score
+}
+
+/**
+ * Compute a recency score using exponential decay.
+ * Returns ~1.0 for events from now, ~0.5 for 24h ago, ~0.01 for a week ago.
+ */
+function recencyScore(timestamp: number): number {
+  const hoursAgo = (Date.now() - timestamp) / (1_000 * 60 * 60)
+  return 1 / (1 + hoursAgo / 24)
 }
 
 /**
@@ -261,59 +300,66 @@ function scoreEvent(event: MemoryEvent, keywords: string[]): number {
  * Returns formatted memory string for prompt injection.
  * Used by the assist handler to inject contextually relevant memories.
  */
+/**
+ * Search memory for events relevant to a query within a single project.
+ * Now uses TF-IDF scoring. For cross-project search, use searchAllMemory().
+ */
 export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents = 15): string | null {
   const project = loadProjectMemory(key.projectKey)
   const task = loadTaskMemory(key.projectKey, key.taskKey)
 
   if (!project && !task) return null
 
-  // Collect all events with source labels
-  const allEvents: { event: MemoryEvent; source: string }[] = []
+  // Collect all events with searchable text
+  const items: { event: MemoryEvent; source: string; searchText: string }[] = []
 
   if (project) {
     for (const e of project.events) {
-      allEvents.push({ event: e, source: `Project: ${key.projectName}` })
+      items.push({
+        event: e,
+        source: `Project: ${key.projectName}`,
+        searchText: `${key.projectName} ${e.content}`.toLowerCase(),
+      })
     }
   }
   if (task) {
     for (const e of task.events) {
-      allEvents.push({ event: e, source: `Task: ${key.branchName}` })
+      items.push({
+        event: e,
+        source: `Task: ${key.branchName}`,
+        searchText: `${key.projectName} ${key.branchName} ${e.content}`.toLowerCase(),
+      })
     }
   }
 
-  if (allEvents.length === 0) return null
+  if (items.length === 0) return null
 
   const keywords = extractKeywords(query)
+  const searchTexts = items.map((it) => it.searchText)
+  const idfMap = keywords.length > 0 ? computeIdf(searchTexts, keywords) : new Map<string, number>()
 
-  // If we have keywords, score and sort by relevance; otherwise just use recency
-  let selected: { event: MemoryEvent; source: string }[]
+  // Score with TF-IDF + recency (adaptive weighting)
+  const scored = items.map((item) => {
+    const rec = recencyScore(item.event.timestamp)
+    let tfidf = scoreTfIdf(item.searchText, keywords, idfMap)
+    if (item.event.importance === "high") tfidf *= 1.5
+    return { ...item, _recency: rec, _tfidf: tfidf, score: 0 }
+  })
 
-  if (keywords.length > 0) {
-    // Score all events
-    const scored = allEvents.map(item => ({
-      ...item,
-      score: scoreEvent(item.event, keywords),
-    }))
+  const maxTfidf = Math.max(...scored.map((s) => s._tfidf), 0.001)
+  const hasKeywords = keywords.length > 0
 
-    // Split into matched (score > 0) and unmatched
-    const matched = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
-    const unmatched = scored.filter(s => s.score === 0).sort((a, b) => a.event.timestamp - b.event.timestamp)
-
-    // Take matched first, fill remaining slots with most recent unmatched
-    const remaining = maxEvents - matched.length
-    const recentFill = remaining > 0 ? unmatched.slice(-remaining) : []
-    selected = [...matched.slice(0, maxEvents), ...recentFill]
-  } else {
-    // No keywords — just take most recent, prioritizing non-low importance
-    const important = allEvents.filter(e => e.event.importance !== "low")
-    const rest = allEvents.filter(e => e.event.importance === "low")
-    selected = [...important.slice(-maxEvents), ...rest.slice(-(maxEvents - important.length))]
+  for (const s of scored) {
+    const norm = s._tfidf / maxTfidf
+    s.score = hasKeywords ? 0.5 * s._recency + 0.5 * norm : s._recency
   }
+
+  scored.sort((a, b) => b.score - a.score)
+  const selected = scored.slice(0, maxEvents)
 
   // Format output
   const lines: string[] = []
   let currentSource = ""
-  // Sort by timestamp for readability
   selected.sort((a, b) => a.event.timestamp - b.event.timestamp)
 
   for (const { event, source } of selected) {
@@ -324,6 +370,129 @@ export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents =
     }
     const ago = formatTimeAgo(Date.now() - event.timestamp)
     lines.push(`- ${event.content} (${event.type}, ${ago})`)
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null
+}
+
+// --- Cross-project search ---
+
+/**
+ * List all project keys in the memory directory.
+ */
+export function listAllProjects(): string[] {
+  const projectsDir = join(getMemoryBaseDir(), "projects")
+  if (!existsSync(projectsDir)) return []
+  try {
+    return readdirSync(projectsDir).filter((d) => {
+      const projPath = join(projectsDir, d, "project.json")
+      return existsSync(projPath)
+    })
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Search ALL projects and branches for events relevant to a query.
+ * Uses TF-IDF for keyword relevance + exponential decay for recency.
+ * Adaptive weighting: keyword-heavy queries lean on TF-IDF, vague queries lean on recency.
+ *
+ * Returns formatted memory string with source labels, or null if no memory exists.
+ */
+export function searchAllMemory(query: string, maxEvents = 25): string | null {
+  const projectKeys = listAllProjects()
+  if (projectKeys.length === 0) return null
+
+  // 1. Collect all events across all projects and branches
+  const items: { event: MemoryEvent; projectName: string; branchName: string }[] = []
+
+  for (const pk of projectKeys) {
+    const project = loadProjectMemory(pk)
+    if (!project) continue
+
+    // Project-level events
+    for (const e of project.events) {
+      items.push({ event: e, projectName: project.projectName, branchName: "" })
+    }
+
+    // Task-level events (all branches)
+    const taskKeys = listTaskKeys(pk)
+    for (const tk of taskKeys) {
+      const task = loadTaskMemory(pk, tk)
+      if (!task) continue
+      for (const e of task.events) {
+        items.push({ event: e, projectName: project.projectName, branchName: task.branchName })
+      }
+    }
+  }
+
+  if (items.length === 0) return null
+
+  // 2. Build searchable text for each event (includes project + branch names)
+  const searchTexts = items.map(
+    (it) => `${it.projectName} ${it.branchName} ${it.event.content}`.toLowerCase(),
+  )
+
+  // 3. Extract keywords and compute IDF
+  const keywords = extractKeywords(query)
+  const idfMap = keywords.length > 0 ? computeIdf(searchTexts, keywords) : new Map<string, number>()
+
+  // 4. Score each event
+  const scored: ScoredEvent[] = items.map((item, i) => {
+    const recency = recencyScore(item.event.timestamp)
+    const tfidf = scoreTfIdf(searchTexts[i]!, keywords, idfMap)
+
+    // Boost high-importance events
+    const boostedTfidf = item.event.importance === "high" ? tfidf * 1.5 : tfidf
+
+    return {
+      event: item.event,
+      source: item.branchName
+        ? `${item.projectName} (${item.branchName})`
+        : item.projectName,
+      searchText: searchTexts[i]!,
+      score: 0, // computed below
+      _recency: recency,
+      _tfidf: boostedTfidf,
+    }
+  })
+
+  // 5. Normalize TF-IDF scores to 0-1 range
+  const maxTfidf = Math.max(...scored.map((s) => s._tfidf), 0.001)
+
+  // 6. Adaptive weighting: if keywords exist, balance; otherwise pure recency
+  const hasKeywords = keywords.length > 0
+  for (const s of scored) {
+    const normalizedTfidf = s._tfidf / maxTfidf
+    s.score = hasKeywords
+      ? 0.5 * s._recency + 0.5 * normalizedTfidf
+      : s._recency
+  }
+
+  // 7. Sort by score, take top N
+  scored.sort((a, b) => b.score - a.score)
+  const selected = scored.slice(0, maxEvents)
+
+  if (selected.length === 0) return null
+
+  // 8. Format output grouped by source, sorted chronologically within groups
+  const groups = new Map<string, ScoredEvent[]>()
+  for (const s of selected) {
+    const existing = groups.get(s.source) ?? []
+    existing.push(s)
+    groups.set(s.source, existing)
+  }
+
+  const lines: string[] = []
+  for (const [source, events] of groups) {
+    if (lines.length > 0) lines.push("")
+    lines.push(`[${source}]`)
+    events.sort((a, b) => a.event.timestamp - b.event.timestamp)
+    for (const { event } of events) {
+      const ago = formatTimeAgo(Date.now() - event.timestamp)
+      lines.push(`- ${event.content} (${event.type}, ${ago})`)
+    }
   }
 
   return lines.length > 0 ? lines.join("\n") : null

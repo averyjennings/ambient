@@ -23,7 +23,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, searchMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory, loadTaskMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm } from "../assist/fast-llm.js"
@@ -349,42 +349,11 @@ async function handleRequest(
       const agentConfig = builtinAgents[agentName]
       let contextBlock = context.formatForPrompt()
 
-      // Inject persistent memory — try current project, fall back to recent activity
+      // Inject persistent memory — search across ALL projects and branches
       if (!shouldContinue) {
-        let memoryBlock = formatMemoryForPrompt(memKey)
-
-        // If no memory for current dir, check recent command cwds
-        if (!memoryBlock) {
-          const shellCtx = context.getContext()
-          const recentCwds = shellCtx.recentCommands.map((c: { cwd: string }) => c.cwd).filter(Boolean)
-          const seen = new Set<string>()
-          for (let i = recentCwds.length - 1; i >= 0; i--) {
-            const cwd = recentCwds[i]!
-            if (seen.has(cwd)) continue
-            seen.add(cwd)
-            const recentKey = resolveMemoryKey(cwd)
-            if (recentKey.projectKey !== memKey.projectKey) {
-              memoryBlock = formatMemoryForPrompt(recentKey)
-              if (memoryBlock) break
-            }
-          }
-        }
-
-        // Last resort: find the most recently active project on disk
-        if (!memoryBlock) {
-          const recent = findMostRecentMemory()
-          if (recent) {
-            const task = recent.memory.events.slice(-10)
-            const lines = [`[Project: ${recent.memory.projectName}]`]
-            for (const e of task) {
-              lines.push(`- ${e.content} (${e.type})`)
-            }
-            memoryBlock = lines.join("\n")
-          }
-        }
-
+        const memoryBlock = searchAllMemory(payload.prompt)
         if (memoryBlock) {
-          contextBlock += `\n\n[Ambient Memory — persistent context across sessions]\n${memoryBlock}`
+          contextBlock += `\n\n[Long-term memory — persists across sessions]\n${memoryBlock}`
         }
       }
 
@@ -533,39 +502,11 @@ async function handleRequest(
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
 
-      // Search persistent memory — keyword-match against what the user typed,
-      // with three-tier fallback (current project → recent cwds → any project)
+      // Search persistent memory across ALL projects — TF-IDF + recency scoring
       const memKey = resolveMemoryKey(payload.cwd)
       const userInput = payload.command
-      let assistMemory = searchMemoryForPrompt(memKey, userInput)
-
-      if (!assistMemory) {
-        const recentCwds = ctx.recentCommands.map((c: { cwd: string }) => c.cwd).filter(Boolean)
-        const seen = new Set<string>()
-        for (let i = recentCwds.length - 1; i >= 0; i--) {
-          const cwd = recentCwds[i]!
-          if (seen.has(cwd)) continue
-          seen.add(cwd)
-          const recentKey = resolveMemoryKey(cwd)
-          if (recentKey.projectKey !== memKey.projectKey) {
-            assistMemory = searchMemoryForPrompt(recentKey, userInput)
-            if (assistMemory) break
-          }
-        }
-      }
-
-      if (!assistMemory) {
-        const recent = findMostRecentMemory()
-        if (recent) {
-          const lines = [`[Project: ${recent.memory.projectName}]`]
-          for (const e of recent.memory.events.slice(-10)) {
-            lines.push(`- ${e.content} (${e.type})`)
-          }
-          assistMemory = lines.join("\n")
-        }
-      }
-
-      const memorySection = assistMemory ? `\nYour memory (things you remember about this project):\n${assistMemory}` : ""
+      const assistMemory = searchAllMemory(userInput)
+      const memorySection = assistMemory ? `\nYour long-term memory (persists across sessions — this is what you remember):\n${assistMemory}` : ""
 
       // Classify the input — exit 127 is always conversational (command not found).
       // For other exit codes, apply heuristic detection as a safety net for when
@@ -578,13 +519,15 @@ async function handleRequest(
 The user typed: \`${input}\`
 ${isConversational ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}
 
-${contextBlock}${historyBlock}${memorySection}
+[Current session context]
+${contextBlock}${historyBlock}
+${memorySection}
 
 How to respond:
 ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
 - If they're greeting you, greet them back warmly.
 - If they're asking a question, answer it using your memory and their terminal context.
-- If they ask about "your context" or "what you know", share what you remember from your memory section above.
+- If they ask about "your memory", "what you know", or "what you remember", share specifics from your long-term memory section above. List concrete facts you remember.
 - If it looks like a mistyped command (e.g. "gti status"), suggest the correction.
 - Do NOT explain that their input "failed" or "wasn't a command" — they know they're talking to you.` : `- This was a real command that failed. Help them fix it.
 - If there's stderr output, diagnose the specific error.
