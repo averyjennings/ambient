@@ -101,7 +101,7 @@ export async function streamFastLlm(
  * Uses a higher max_tokens limit (500) for compaction summaries.
  * Returns null if the API key is missing or the call fails.
  */
-export async function callFastLlm(prompt: string): Promise<string | null> {
+export async function callFastLlm(prompt: string, maxTokens?: number): Promise<string | null> {
   const apiKey = process.env["ANTHROPIC_API_KEY"]
   if (!apiKey) return null
 
@@ -115,10 +115,10 @@ export async function callFastLlm(prompt: string): Promise<string | null> {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: COMPACT_MAX_TOKENS,
+        max_tokens: maxTokens ?? COMPACT_MAX_TOKENS,
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(15_000),
     })
 
     if (!response.ok) return null

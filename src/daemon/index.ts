@@ -26,7 +26,7 @@ import { loadConfig } from "../config.js"
 import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
-import { streamFastLlm } from "../assist/fast-llm.js"
+import { streamFastLlm, callFastLlm } from "../assist/fast-llm.js"
 import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
@@ -202,6 +202,89 @@ function classifyCommand(command: string, exitCode: number): {
   }
 
   return null
+}
+
+/**
+ * Extract structured memories from an agent's response using Haiku.
+ * Runs async after the response is streamed to the user — zero UX impact.
+ *
+ * Haiku reads the user's prompt + agent response and outputs atomic memory
+ * items as JSON-lines. Each item has a type, content, and importance level.
+ */
+async function extractAndStoreMemories(
+  userPrompt: string,
+  agentResponse: string,
+  memKey: MemoryKey,
+): Promise<void> {
+  // Skip trivial responses
+  if (agentResponse.length < 200) return
+
+  const extractionPrompt = `You are a memory extraction system. Given a user's prompt and an AI agent's response, extract discrete facts worth remembering across sessions.
+
+User asked: "${userPrompt.slice(0, 500)}"
+
+Agent responded:
+${agentResponse.slice(0, 6000)}
+
+Extract memories as JSON-lines. Each line must be a valid JSON object with these fields:
+- "type": one of "decision", "error-resolution", "task-update", "file-context"
+- "content": a concise 1-2 sentence fact (not a summary of the whole response)
+- "importance": "high" for architecture/design decisions, "medium" for useful context, "low" for minor details
+
+Rules:
+- Only extract facts that would be useful to recall in future sessions
+- Each memory should be atomic and self-contained
+- Skip greetings, pleasantries, and meta-commentary
+- Skip things that are obvious from the codebase itself
+- Prefer concrete facts: decisions made, errors resolved, patterns discovered
+- Output NOTHING (empty response) if there's nothing worth remembering
+- Maximum 10 items
+
+Output only JSON-lines, no other text.`
+
+  const result = await callFastLlm(extractionPrompt, 1000)
+  if (!result) return
+
+  let stored = 0
+  for (const line of result.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
+
+    try {
+      const item = JSON.parse(trimmed) as {
+        type?: string
+        content?: string
+        importance?: string
+      }
+
+      if (!item.content || !item.type) continue
+
+      const eventType = (["decision", "error-resolution", "task-update", "file-context"] as const)
+        .find(t => t === item.type) ?? "task-update"
+      const importance = (["low", "medium", "high"] as const)
+        .find(i => i === item.importance) ?? "medium"
+
+      const event = {
+        id: globalThis.crypto.randomUUID(),
+        type: eventType,
+        timestamp: Date.now(),
+        content: item.content.slice(0, 500),
+        importance,
+      }
+
+      if (importance === "high") {
+        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
+      }
+      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
+      stored++
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  if (stored > 0) {
+    log("info", `Extracted ${stored} memories from agent response for ${memKey.projectName}:${memKey.branchName}`)
+  }
 }
 
 async function handleRequest(
@@ -406,18 +489,12 @@ async function handleRequest(
         sessionMemoryKeys.set(sKey, memKey)
       }
 
-      // Record this interaction as a memory event immediately (not just on shutdown)
+      // Extract structured memories from the agent's response via Haiku (async, non-blocking).
+      // Replaces the old "first 300 chars" summary with intelligent extraction.
       if (result.fullResponse.length > 0) {
-        setTimeout(() => {
-          const querySummary = `Asked ${agentName}: "${prompt.slice(0, 100)}". Response: ${result.fullResponse.slice(0, 300).replace(/\n/g, " ").trim()}`
-          addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, {
-            id: globalThis.crypto.randomUUID(),
-            type: "session-summary",
-            timestamp: Date.now(),
-            content: querySummary.slice(0, 500),
-            importance: "low",
-          })
-        }, 0)
+        extractAndStoreMemories(prompt, result.fullResponse, memKey).catch((err: unknown) => {
+          log("warn", `Memory extraction failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
       }
 
       break
