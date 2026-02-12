@@ -23,7 +23,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, searchMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, searchMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory, loadTaskMemory } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm } from "../assist/fast-llm.js"
@@ -138,24 +138,57 @@ function classifyCommand(command: string, exitCode: number): {
   }
 
   // Package manager operations
-  if (base === "npm" || base === "pnpm" || base === "yarn" || base === "bun") {
+  if (base === "npm" || base === "pnpm" || base === "yarn" || base === "bun" || base === "pip" || base === "pip3" || base === "cargo") {
     const sub = (words[1] ?? "").toLowerCase()
-    if (sub === "install" || sub === "add" || sub === "remove" || sub === "uninstall") {
+    if (sub === "install" || sub === "add" || sub === "remove" || sub === "uninstall" || sub === "i") {
       const pkg = words.slice(2).filter(w => !w.startsWith("-")).join(" ")
       const verb = (sub === "remove" || sub === "uninstall") ? "Removed" : "Installed"
       if (pkg) return { type: "task-update", content: `${verb}: ${pkg}`, importance: "low" }
     }
   }
 
-  // Build/test results — only record failures (successes are noise)
-  if (exitCode !== 0) {
-    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup)\b/i.test(cmd)
-    const isTest = /\b(test|jest|vitest|mocha|pytest|cargo\s+test)\b/i.test(cmd)
-    const isLint = /\b(lint|eslint|prettier|clippy)\b/i.test(cmd)
+  // Docker/compose operations
+  if (base === "docker" || base === "docker-compose") {
+    const sub = (words[1] ?? "").toLowerCase()
+    if (sub === "build" || sub === "up" || sub === "down" || sub === "run" || sub === "compose") {
+      const status = exitCode === 0 ? "succeeded" : `failed (exit ${exitCode})`
+      return { type: "task-update", content: `Docker ${words.slice(1, 4).join(" ")} ${status}`, importance: exitCode === 0 ? "low" : "medium" }
+    }
+  }
 
+  // Make targets
+  if (base === "make") {
+    const target = words[1] ?? "default"
+    if (exitCode !== 0) return { type: "error-resolution", content: `make ${target} failed (exit ${exitCode})`, importance: "medium" }
+  }
+
+  // Terraform/infrastructure
+  if (base === "terraform" || base === "tf") {
+    const sub = (words[1] ?? "").toLowerCase()
+    if (sub === "apply" || sub === "plan" || sub === "destroy" || sub === "init") {
+      const status = exitCode === 0 ? "succeeded" : `failed (exit ${exitCode})`
+      return { type: "task-update", content: `terraform ${sub} ${status}`, importance: "medium" }
+    }
+  }
+
+  // Build/test results — record both failures AND successes after a failure
+  const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup)\b/i.test(cmd)
+  const isTest = /\b(test|jest|vitest|mocha|pytest|cargo\s+test|go\s+test)\b/i.test(cmd)
+  const isLint = /\b(lint|eslint|prettier|clippy|ruff)\b/i.test(cmd)
+
+  if (exitCode !== 0) {
     if (isBuild) return { type: "error-resolution", content: `Build failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
     if (isTest) return { type: "error-resolution", content: `Tests failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
     if (isLint) return { type: "error-resolution", content: `Lint failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "low" }
+  } else {
+    // Record build/test successes only (they indicate a fix or milestone)
+    if (isBuild) return { type: "task-update", content: `Build passed: \`${cmd.slice(0, 120)}\``, importance: "low" }
+    if (isTest) return { type: "task-update", content: `Tests passed: \`${cmd.slice(0, 120)}\``, importance: "low" }
+  }
+
+  // Any other non-zero exit for multi-word commands (likely real work, not typos)
+  if (exitCode !== 0 && exitCode !== 127 && words.length >= 2) {
+    return { type: "error-resolution", content: `Command failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "low" }
   }
 
   return null
@@ -583,13 +616,27 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
       sendResponse(socket, { type: "done", data: "" })
 
       // Record the interaction as a memory event (async, non-blocking)
+      // Skip trivial inputs: greetings, single words, very short exchanges
       const assistResponse = assistChunks.join("")
-      if (ok && assistResponse.length > 0) {
+      const inputWords = input.trim().split(/\s+/).length
+      const isTrivial = inputWords <= 2 && /^(hi|hey|hello|yo|sup|salad|test|ping|lol|ok|yes|no|thanks|bye)\b/i.test(input.trim())
+
+      if (ok && assistResponse.length > 10 && !isTrivial) {
         setTimeout(() => {
           const summary = isConversational
-            ? `User asked: "${input.slice(0, 100)}". Ambient responded about ${assistResponse.slice(0, 200).replace(/\n/g, " ").trim()}`
-            : `Error with \`${input.slice(0, 80)}\` (exit ${payload.exitCode}). Ambient suggested: ${assistResponse.slice(0, 200).replace(/\n/g, " ").trim()}`
+            ? `User asked: "${input.slice(0, 150)}". Ambient responded: ${assistResponse.slice(0, 400).replace(/\n/g, " ").trim()}`
+            : `Error with \`${input.slice(0, 100)}\` (exit ${payload.exitCode}). Ambient suggested: ${assistResponse.slice(0, 400).replace(/\n/g, " ").trim()}`
           const eventType = isConversational ? "session-summary" as const : "error-resolution" as const
+
+          // Deduplicate: skip if the most recent event has the same type and similar content
+          const existing = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+          if (existing && existing.events.length > 0) {
+            const last = existing.events[existing.events.length - 1]!
+            if (last.type === eventType && last.content.slice(0, 80) === summary.slice(0, 80)) {
+              return // duplicate, skip
+            }
+          }
+
           addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, {
             id: globalThis.crypto.randomUUID(),
             type: eventType,
