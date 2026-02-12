@@ -141,14 +141,16 @@ _ambient_accept_line() {
     fi
   fi
 
-  # 3. Starts with a conversational word (2+ words, first word isn't a command)
+  # 3. Starts with a conversational word (2+ words, first word isn't a real command)
   if (( is_natural == 0 )); then
     local first_word="${buf%% *}"
     local lower_first="${first_word:l}"
     case "$lower_first" in
-      what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|ambient|yo|sup)
-        # Only if multi-word (avoid intercepting real commands like `who`)
-        if [[ "$buf" == *" "* ]]; then
+      what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
+        # Only if multi-word AND the first word isn't an external command.
+        # whence -p checks PATH only (not builtins/functions/aliases), so
+        # "ambient daemon stop" passes through but "help me fix this" is caught.
+        if [[ "$buf" == *" "* ]] && ! whence -p "$first_word" &>/dev/null; then
           is_natural=1
         fi
         ;;

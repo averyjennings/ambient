@@ -93,14 +93,14 @@ function looksLikeNaturalLanguage(input: string): boolean {
   // Contains ? in a multi-word context — almost always natural language
   if (trimmed.includes("?")) return true
 
-  // Starts with a conversational word
+  // Starts with a conversational word (not "ambient" — that's the CLI command)
   const conversationStarters = new Set([
     "what", "how", "why", "where", "when", "who",
     "can", "could", "would", "should", "does", "did",
     "is", "are", "was", "were",
     "tell", "show", "explain", "help",
     "hey", "hi", "hello", "thanks", "thank", "please",
-    "ambient", "yo", "sup",
+    "yo", "sup",
   ])
   const firstWord = (words[0] ?? "").toLowerCase()
   if (conversationStarters.has(firstWord)) return true
