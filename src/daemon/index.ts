@@ -111,6 +111,56 @@ function looksLikeNaturalLanguage(input: string): boolean {
   return false
 }
 
+/**
+ * Classify a shell command as notable enough to persist as a memory event.
+ * Returns an event type and description, or null if not worth recording.
+ */
+function classifyCommand(command: string, exitCode: number): {
+  type: "task-update" | "error-resolution" | "file-context"
+  content: string
+  importance: "low" | "medium"
+} | null {
+  const cmd = command.trim()
+  const words = cmd.split(/\s+/)
+  const base = (words[0] ?? "").toLowerCase()
+
+  // Git operations — branch switches, commits, merges are significant
+  if (base === "git") {
+    const sub = (words[1] ?? "").toLowerCase()
+    if (sub === "checkout" || sub === "switch") {
+      const branch = words.slice(2).filter(w => !w.startsWith("-")).pop() ?? ""
+      if (branch) return { type: "task-update", content: `Switched to branch: ${branch}`, importance: "medium" }
+    }
+    if (sub === "commit") return { type: "task-update", content: `Committed: \`${cmd.slice(0, 120)}\``, importance: "low" }
+    if (sub === "merge") return { type: "task-update", content: `Merged: \`${cmd.slice(0, 120)}\``, importance: "medium" }
+    if (sub === "stash") return { type: "task-update", content: `Stashed changes`, importance: "low" }
+    if (sub === "rebase") return { type: "task-update", content: `Rebased: \`${cmd.slice(0, 120)}\``, importance: "medium" }
+  }
+
+  // Package manager operations
+  if (base === "npm" || base === "pnpm" || base === "yarn" || base === "bun") {
+    const sub = (words[1] ?? "").toLowerCase()
+    if (sub === "install" || sub === "add" || sub === "remove" || sub === "uninstall") {
+      const pkg = words.slice(2).filter(w => !w.startsWith("-")).join(" ")
+      const verb = (sub === "remove" || sub === "uninstall") ? "Removed" : "Installed"
+      if (pkg) return { type: "task-update", content: `${verb}: ${pkg}`, importance: "low" }
+    }
+  }
+
+  // Build/test results — only record failures (successes are noise)
+  if (exitCode !== 0) {
+    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup)\b/i.test(cmd)
+    const isTest = /\b(test|jest|vitest|mocha|pytest|cargo\s+test)\b/i.test(cmd)
+    const isLint = /\b(lint|eslint|prettier|clippy)\b/i.test(cmd)
+
+    if (isBuild) return { type: "error-resolution", content: `Build failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
+    if (isTest) return { type: "error-resolution", content: `Tests failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
+    if (isLint) return { type: "error-resolution", content: `Lint failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "low" }
+  }
+
+  return null
+}
+
 async function handleRequest(
   socket: import("node:net").Socket,
   request: DaemonRequest,
@@ -164,6 +214,24 @@ async function handleRequest(
           }, 0)
         } else if (payload.event === "precmd") {
           contextFileGen.scheduleRegeneration(gitRoot, shellCtx, memKey)
+
+          // Persist notable shell commands as memories
+          const lastCmd = shellCtx.lastCommand
+          const exitCode = payload.exitCode ?? 0
+          if (lastCmd) {
+            const notable = classifyCommand(lastCmd, exitCode)
+            if (notable) {
+              setTimeout(() => {
+                addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, {
+                  id: globalThis.crypto.randomUUID(),
+                  type: notable.type,
+                  timestamp: Date.now(),
+                  content: notable.content,
+                  importance: notable.importance,
+                })
+              }, 0)
+            }
+          }
         }
       }
 
