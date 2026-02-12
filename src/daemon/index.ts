@@ -326,6 +326,20 @@ async function handleRequest(
         sessionMemoryKeys.set(sKey, memKey)
       }
 
+      // Record this interaction as a memory event immediately (not just on shutdown)
+      if (result.fullResponse.length > 0) {
+        setTimeout(() => {
+          const querySummary = `Asked ${agentName}: "${prompt.slice(0, 100)}". Response: ${result.fullResponse.slice(0, 300).replace(/\n/g, " ").trim()}`
+          addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, {
+            id: globalThis.crypto.randomUUID(),
+            type: "session-summary",
+            timestamp: Date.now(),
+            content: querySummary.slice(0, 500),
+            importance: "low",
+          })
+        }, 0)
+      }
+
       break
     }
 
@@ -487,7 +501,9 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
       log("info", `Auto-assist for \`${input}\` (exit ${payload.exitCode}, ${isConversational ? "conversation" : "error"}) via Haiku streaming`)
 
       // Stream Haiku response — first tokens arrive in ~200-300ms
+      const assistChunks: string[] = []
       const ok = await streamFastLlm(assistPrompt, (text) => {
+        assistChunks.push(text)
         sendResponse(socket, { type: "chunk", data: text })
       })
 
@@ -495,6 +511,24 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
         log("warn", "Haiku streaming call failed")
       }
       sendResponse(socket, { type: "done", data: "" })
+
+      // Record the interaction as a memory event (async, non-blocking)
+      const assistResponse = assistChunks.join("")
+      if (ok && assistResponse.length > 0) {
+        setTimeout(() => {
+          const summary = isConversational
+            ? `User asked: "${input.slice(0, 100)}". Ambient responded about ${assistResponse.slice(0, 200).replace(/\n/g, " ").trim()}`
+            : `Error with \`${input.slice(0, 80)}\` (exit ${payload.exitCode}). Ambient suggested: ${assistResponse.slice(0, 200).replace(/\n/g, " ").trim()}`
+          const eventType = isConversational ? "session-summary" as const : "error-resolution" as const
+          addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, {
+            id: globalThis.crypto.randomUUID(),
+            type: eventType,
+            timestamp: Date.now(),
+            content: summary.slice(0, 500),
+            importance: isConversational ? "low" : "medium",
+          })
+        }, 0)
+      }
 
       break
     }
