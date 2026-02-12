@@ -113,28 +113,56 @@ add-zsh-hook preexec _ambient_preexec
 add-zsh-hook precmd _ambient_precmd
 add-zsh-hook chpwd _ambient_chpwd
 
-# --- ZLE widget: intercept natural language with apostrophes ---
-# When the user types something like "what's the status" or "don't do that",
-# the unmatched apostrophe would make zsh wait for a closing quote.
-# We detect mid-word apostrophes (letter'letter) and route to ambient instead.
+# --- ZLE widget: intercept natural language before zsh tries to execute ---
+# Catches: apostrophes (what's), question marks (what?), and conversation starters.
+# This runs BEFORE zsh parses the input, preventing glob errors on ? and
+# quote-wait on unmatched apostrophes.
 _ambient_accept_line() {
   local buf="$BUFFER"
   [[ -z "$buf" ]] && { zle .accept-line; return }
 
-  # Check for unmatched single quotes
+  local is_natural=0
+
+  # 1. Unmatched apostrophes that look like contractions (what's, don't, I'm)
   local singles="${buf//[^\']/}"
   if (( ${#singles} % 2 != 0 )); then
-    # Apostrophe is mid-word (what's, don't, I'm) → natural language
-    # vs at a word boundary (echo 'hello, grep 'pattern) → real command
     if [[ "$buf" =~ [a-zA-Z]\'[a-zA-Z] ]]; then
-      print
-      printf '\033[2m\033[33m  ambient → '
-      ${=AMBIENT_BIN} assist "$buf" 127 2>/dev/null
-      printf '\033[0m\n'
-      BUFFER=""
-      zle reset-prompt
-      return
+      is_natural=1
     fi
+  fi
+
+  # 2. Contains ? — almost always natural language, rarely a real command
+  #    Exception: single-word glob patterns like *.? or file?
+  if (( is_natural == 0 )) && [[ "$buf" == *"?"* ]]; then
+    local word_count=${#${=buf}}
+    # Multi-word input with ? is natural language
+    if (( word_count >= 2 )); then
+      is_natural=1
+    fi
+  fi
+
+  # 3. Starts with a conversational word (2+ words, first word isn't a command)
+  if (( is_natural == 0 )); then
+    local first_word="${buf%% *}"
+    local lower_first="${first_word:l}"
+    case "$lower_first" in
+      what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|ambient|yo|sup)
+        # Only if multi-word (avoid intercepting real commands like `who`)
+        if [[ "$buf" == *" "* ]]; then
+          is_natural=1
+        fi
+        ;;
+    esac
+  fi
+
+  if (( is_natural == 1 )); then
+    print
+    printf '\033[2m\033[33m  ambient → '
+    ${=AMBIENT_BIN} assist "$buf" 127 2>/dev/null
+    printf '\033[0m\n'
+    BUFFER=""
+    zle reset-prompt
+    return
   fi
 
   zle .accept-line

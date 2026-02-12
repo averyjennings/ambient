@@ -76,6 +76,40 @@ function sendResponse(socket: import("node:net").Socket, response: DaemonRespons
   socket.write(line)
 }
 
+/**
+ * Heuristic: does the input look like natural language rather than a shell command?
+ * Mirrors the ZLE widget detection in ambient.zsh as a daemon-side safety net.
+ */
+function looksLikeNaturalLanguage(input: string): boolean {
+  const trimmed = input.trim()
+  if (!trimmed) return false
+
+  const words = trimmed.split(/\s+/)
+
+  // Single-word inputs are probably commands (or typos), not conversation
+  if (words.length < 2) return false
+
+  // Contains ? in a multi-word context — almost always natural language
+  if (trimmed.includes("?")) return true
+
+  // Starts with a conversational word
+  const conversationStarters = new Set([
+    "what", "how", "why", "where", "when", "who",
+    "can", "could", "would", "should", "does", "did",
+    "is", "are", "was", "were",
+    "tell", "show", "explain", "help",
+    "hey", "hi", "hello", "thanks", "thank", "please",
+    "ambient", "yo", "sup",
+  ])
+  const firstWord = (words[0] ?? "").toLowerCase()
+  if (conversationStarters.has(firstWord)) return true
+
+  // Contains contractions (apostrophes between letters) — "what's", "don't", "I'm"
+  if (/[a-zA-Z]'[a-zA-Z]/.test(trimmed) && words.length >= 2) return true
+
+  return false
+}
+
 async function handleRequest(
   socket: import("node:net").Socket,
   request: DaemonRequest,
@@ -362,19 +396,21 @@ async function handleRequest(
       const memoryBlock = formatMemoryForPrompt(memKey)
       const memorySection = memoryBlock ? `\nYour memory (things you remember about this project):\n${memoryBlock}` : ""
 
-      // Classify the input to adjust the prompt framing
-      const isCommandNotFound = payload.exitCode === 127
+      // Classify the input — exit 127 is always conversational (command not found).
+      // For other exit codes, apply heuristic detection as a safety net for when
+      // the ZLE widget doesn't catch natural language (e.g. edge cases).
       const input = payload.command
+      const isConversational = payload.exitCode === 127 || looksLikeNaturalLanguage(input)
 
       const assistPrompt = `You are "ambient", a friendly AI companion that lives in the user's terminal. You have persistent memory about their projects and can see their shell activity.
 
 The user typed: \`${input}\`
-${isCommandNotFound ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}
+${isConversational ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}
 
 ${contextBlock}${historyBlock}${memorySection}
 
 How to respond:
-${isCommandNotFound ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
+${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
 - If they're greeting you, greet them back warmly.
 - If they're asking a question, answer it using your memory and their terminal context.
 - If they ask about "your context" or "what you know", share what you remember from your memory section above.
@@ -393,7 +429,7 @@ ${isCommandNotFound ? `- The user is TALKING TO YOU. Respond conversationally an
         break
       }
 
-      log("info", `Auto-assist for \`${input}\` (exit ${payload.exitCode}, ${isCommandNotFound ? "conversation" : "error"}) via Haiku streaming`)
+      log("info", `Auto-assist for \`${input}\` (exit ${payload.exitCode}, ${isConversational ? "conversation" : "error"}) via Haiku streaming`)
 
       // Stream Haiku response — first tokens arrive in ~200-300ms
       const ok = await streamFastLlm(assistPrompt, (text) => {
