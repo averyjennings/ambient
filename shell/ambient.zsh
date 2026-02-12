@@ -74,7 +74,17 @@ _ambient_nocapture="vim nvim vi nano emacs less more man bat ssh top htop btop w
 _ambient_should_capture() {
   local first="${1%% *}"
   first="${first##*/}"  # strip path prefix (e.g. /usr/bin/git → git)
+
+  # Check the command itself
   [[ " $_ambient_nocapture " == *" $first "* ]] && return 1
+
+  # Resolve aliases: s→"git status"→git, d→"git diff"→git
+  if (( ${+aliases[$first]} )); then
+    local alias_cmd="${aliases[$first]%% *}"
+    alias_cmd="${alias_cmd##*/}"
+    [[ " $_ambient_nocapture " == *" $alias_cmd "* ]] && return 1
+  fi
+
   return 0
 }
 
