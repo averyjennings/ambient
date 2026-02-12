@@ -418,10 +418,37 @@ async function handleRequest(
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
 
-      // Include persistent memory so ambient knows what it knows
+      // Include persistent memory — same three-tier fallback as query handler
       const memKey = resolveMemoryKey(payload.cwd)
-      const memoryBlock = formatMemoryForPrompt(memKey)
-      const memorySection = memoryBlock ? `\nYour memory (things you remember about this project):\n${memoryBlock}` : ""
+      let assistMemory = formatMemoryForPrompt(memKey)
+
+      if (!assistMemory) {
+        const recentCwds = ctx.recentCommands.map((c: { cwd: string }) => c.cwd).filter(Boolean)
+        const seen = new Set<string>()
+        for (let i = recentCwds.length - 1; i >= 0; i--) {
+          const cwd = recentCwds[i]!
+          if (seen.has(cwd)) continue
+          seen.add(cwd)
+          const recentKey = resolveMemoryKey(cwd)
+          if (recentKey.projectKey !== memKey.projectKey) {
+            assistMemory = formatMemoryForPrompt(recentKey)
+            if (assistMemory) break
+          }
+        }
+      }
+
+      if (!assistMemory) {
+        const recent = findMostRecentMemory()
+        if (recent) {
+          const lines = [`[Project: ${recent.memory.projectName}]`]
+          for (const e of recent.memory.events.slice(-10)) {
+            lines.push(`- ${e.content} (${e.type})`)
+          }
+          assistMemory = lines.join("\n")
+        }
+      }
+
+      const memorySection = assistMemory ? `\nYour memory (things you remember about this project):\n${assistMemory}` : ""
 
       // Classify the input — exit 127 is always conversational (command not found).
       // For other exit codes, apply heuristic detection as a safety net for when
