@@ -23,7 +23,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, searchMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm } from "../assist/fast-llm.js"
@@ -500,9 +500,11 @@ async function handleRequest(
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
 
-      // Include persistent memory — same three-tier fallback as query handler
+      // Search persistent memory — keyword-match against what the user typed,
+      // with three-tier fallback (current project → recent cwds → any project)
       const memKey = resolveMemoryKey(payload.cwd)
-      let assistMemory = formatMemoryForPrompt(memKey)
+      const userInput = payload.command
+      let assistMemory = searchMemoryForPrompt(memKey, userInput)
 
       if (!assistMemory) {
         const recentCwds = ctx.recentCommands.map((c: { cwd: string }) => c.cwd).filter(Boolean)
@@ -513,7 +515,7 @@ async function handleRequest(
           seen.add(cwd)
           const recentKey = resolveMemoryKey(cwd)
           if (recentKey.projectKey !== memKey.projectKey) {
-            assistMemory = formatMemoryForPrompt(recentKey)
+            assistMemory = searchMemoryForPrompt(recentKey, userInput)
             if (assistMemory) break
           }
         }

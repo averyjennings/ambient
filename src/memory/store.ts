@@ -208,6 +208,127 @@ export function formatMemoryForPrompt(key: MemoryKey): string | null {
   return lines.length > 0 ? lines.join("\n") : null
 }
 
+// Stop words to ignore when extracting search keywords
+const STOP_WORDS = new Set([
+  "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+  "have", "has", "had", "do", "does", "did", "will", "would", "could",
+  "should", "may", "might", "shall", "can", "need", "dare", "ought",
+  "i", "me", "my", "you", "your", "we", "our", "they", "them", "their",
+  "it", "its", "he", "she", "him", "her", "his", "this", "that", "these",
+  "those", "what", "which", "who", "whom", "where", "when", "how", "why",
+  "and", "or", "but", "not", "no", "if", "then", "else", "so", "than",
+  "too", "very", "just", "about", "above", "after", "again", "all", "also",
+  "am", "any", "as", "at", "back", "because", "before", "between", "both",
+  "by", "came", "come", "each", "even", "for", "from", "get", "got",
+  "go", "going", "here", "in", "into", "know", "let", "like", "look",
+  "make", "many", "more", "most", "much", "of", "on", "only", "other",
+  "out", "over", "re", "really", "right", "said", "same", "see", "some",
+  "still", "such", "take", "tell", "through", "to", "up", "us", "use",
+  "want", "way", "well", "were", "with", "yes", "yet",
+  "remember", "memories", "memory", "everything", "anything", "something",
+  "hey", "hi", "hello", "please", "thanks", "ambient",
+])
+
+/**
+ * Extract meaningful keywords from user input for memory search.
+ */
+function extractKeywords(input: string): string[] {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w))
+}
+
+/**
+ * Score a memory event against search keywords.
+ * Returns 0 if no match, higher = more relevant.
+ */
+function scoreEvent(event: MemoryEvent, keywords: string[]): number {
+  if (keywords.length === 0) return 0
+  const content = event.content.toLowerCase()
+  let score = 0
+  for (const kw of keywords) {
+    if (content.includes(kw)) score += 1
+  }
+  // Boost high-importance events
+  if (event.importance === "high") score *= 1.5
+  return score
+}
+
+/**
+ * Search memory for events relevant to a query, with fallback to recent events.
+ * Returns formatted memory string for prompt injection.
+ * Used by the assist handler to inject contextually relevant memories.
+ */
+export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents = 15): string | null {
+  const project = loadProjectMemory(key.projectKey)
+  const task = loadTaskMemory(key.projectKey, key.taskKey)
+
+  if (!project && !task) return null
+
+  // Collect all events with source labels
+  const allEvents: { event: MemoryEvent; source: string }[] = []
+
+  if (project) {
+    for (const e of project.events) {
+      allEvents.push({ event: e, source: `Project: ${key.projectName}` })
+    }
+  }
+  if (task) {
+    for (const e of task.events) {
+      allEvents.push({ event: e, source: `Task: ${key.branchName}` })
+    }
+  }
+
+  if (allEvents.length === 0) return null
+
+  const keywords = extractKeywords(query)
+
+  // If we have keywords, score and sort by relevance; otherwise just use recency
+  let selected: { event: MemoryEvent; source: string }[]
+
+  if (keywords.length > 0) {
+    // Score all events
+    const scored = allEvents.map(item => ({
+      ...item,
+      score: scoreEvent(item.event, keywords),
+    }))
+
+    // Split into matched (score > 0) and unmatched
+    const matched = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
+    const unmatched = scored.filter(s => s.score === 0).sort((a, b) => a.event.timestamp - b.event.timestamp)
+
+    // Take matched first, fill remaining slots with most recent unmatched
+    const remaining = maxEvents - matched.length
+    const recentFill = remaining > 0 ? unmatched.slice(-remaining) : []
+    selected = [...matched.slice(0, maxEvents), ...recentFill]
+  } else {
+    // No keywords — just take most recent, prioritizing non-low importance
+    const important = allEvents.filter(e => e.event.importance !== "low")
+    const rest = allEvents.filter(e => e.event.importance === "low")
+    selected = [...important.slice(-maxEvents), ...rest.slice(-(maxEvents - important.length))]
+  }
+
+  // Format output
+  const lines: string[] = []
+  let currentSource = ""
+  // Sort by timestamp for readability
+  selected.sort((a, b) => a.event.timestamp - b.event.timestamp)
+
+  for (const { event, source } of selected) {
+    if (source !== currentSource) {
+      if (lines.length > 0) lines.push("")
+      lines.push(`[${source}]`)
+      currentSource = source
+    }
+    const ago = formatTimeAgo(Date.now() - event.timestamp)
+    lines.push(`- ${event.content} (${event.type}, ${ago})`)
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null
+}
+
 // --- Lifecycle ---
 
 export function archiveTask(projectKey: string, taskKey: string): void {
