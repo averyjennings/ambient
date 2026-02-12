@@ -17,6 +17,7 @@ export function detectMergedBranches(gitRoot: string, projectKey: string): strin
   if (knownTasks.length === 0) return []
 
   let mergedBranches: string[]
+  let currentBranch: string
   try {
     const output = execFileSync("git", ["branch", "--merged"], {
       cwd: gitRoot,
@@ -28,9 +29,21 @@ export function detectMergedBranches(gitRoot: string, projectKey: string): strin
       .split("\n")
       .map((b) => b.trim().replace(/^\* /, ""))
       .filter((b) => b.length > 0)
+
+    // Get current branch so we never archive it
+    currentBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
+      cwd: gitRoot,
+      encoding: "utf-8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
   } catch {
     return []
   }
+
+  // Remove the current branch — `git branch --merged` always includes it,
+  // but we never want to archive the branch we're currently on.
+  mergedBranches = mergedBranches.filter((b) => b !== currentBranch)
 
   // Match merged branches against known task keys
   // Task keys have / replaced with -- so we need to check both forms
