@@ -64,14 +64,18 @@ _ambient_handled_by_cnf=0  # flag: command_not_found_handler already responded
 
 # --- command_not_found_handler ---
 # Intercepts "command not found" BEFORE zsh prints its error.
-# Output streams directly to the terminal (no capture), so first
-# tokens from Haiku appear in ~200-300ms.
+# Captures output first to avoid printing an empty "ambient →" prefix
+# when rate-limited or when the daemon is unreachable.
 command_not_found_handler() {
   _ambient_handled_by_cnf=1
-  # Print prefix, then stream Haiku response directly to terminal
-  printf '\033[2m\033[33m  ambient → '
-  perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$*" 127 2>/dev/null
-  printf '\033[0m\n'
+  local response
+  response=$(perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$*" 127 2>/dev/null)
+  if [[ -n "$response" ]]; then
+    printf '\033[2m\033[33m  ambient → %s\033[0m\n' "$response"
+  else
+    # No response (rate-limited or daemon down) — show zsh's default error
+    printf 'zsh: command not found: %s\n' "$1" >&2
+  fi
   return 127
 }
 
@@ -81,6 +85,7 @@ command_not_found_handler() {
 _ambient_preexec() {
   _ambient_last_command="$1"
   _ambient_handled_by_cnf=0
+
   local cmd="$(_ambient_json_escape "$1")"
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":\"${cmd}\",\"cwd\":\"$PWD\"}}"
 }
@@ -88,17 +93,14 @@ _ambient_preexec() {
 # precmd: runs after the command finishes, before the next prompt
 _ambient_precmd() {
   local exit_code=$?
+
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
 
-  # Auto-assist for non-127 errors (127 is handled by command_not_found_handler above).
-  # Skip: exit 0 (success), 127 (already handled), 130 (Ctrl+C), 148 (Ctrl+Z)
-  if (( exit_code != 0 && exit_code != 127 && exit_code != 130 && exit_code != 148 )) && [[ -n "$_ambient_last_command" ]]; then
-    local escaped_cmd="$(_ambient_json_escape "$_ambient_last_command")"
-    printf '\033[2m\033[33m  ambient → '
-    perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$escaped_cmd" "$exit_code" 2>/dev/null
-    printf '\033[0m\n'
-  fi
+  # Auto-assist is intentionally NOT triggered for general command failures.
+  # Exit 127 (command not found) is handled by command_not_found_handler above.
+  # Natural language is caught by the ZLE accept-line widget.
+  # For real command errors, the user can explicitly ask: `r fix`
 }
 
 # chpwd: runs when the directory changes
@@ -207,10 +209,8 @@ rc() {
   capture_file=$(mktemp /tmp/ambient-capture.XXXXXX)
   "$@" 2>&1 | tee "$capture_file"
   local exit_code=${pipestatus[1]}
-  if [[ $exit_code -ne 0 ]]; then
-    # Only capture on failure — success output is rarely useful for context
-    ${=AMBIENT_BIN} capture < "$capture_file" &>/dev/null &
-  fi
+  # Always capture output (not just on failure) so ambient can answer questions about it
+  ${=AMBIENT_BIN} capture < "$capture_file" &>/dev/null &
   rm -f "$capture_file"
   return $exit_code
 }

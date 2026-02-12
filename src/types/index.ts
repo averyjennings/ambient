@@ -85,8 +85,10 @@ export interface AssistPayload {
   readonly exitCode: number
   /** Current working directory */
   readonly cwd: string
-  /** Captured stderr/output (optional, may be empty) */
+  /** Captured stderr (optional, may be empty) */
   readonly stderr?: string
+  /** Captured command output (stdout+stderr from the command that just ran) */
+  readonly output?: string
 }
 
 export interface DaemonRequest {

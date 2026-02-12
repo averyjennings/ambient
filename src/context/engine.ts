@@ -131,13 +131,22 @@ export class ContextEngine {
 
   /**
    * Store captured command output (from `r capture` or shell hook).
-   * Output is cleared after it's been consumed by formatForPrompt().
+   * Stored for both formatForPrompt() (cleared after use) and
+   * getLastOutput() (persistent until next store).
    */
   storeOutput(output: string): void {
-    const MAX_OUTPUT_LENGTH = 4000
+    const MAX_OUTPUT_LENGTH = 10000
     this.lastOutput = output.length > MAX_OUTPUT_LENGTH
       ? output.slice(-MAX_OUTPUT_LENGTH)
       : output
+  }
+
+  /**
+   * Get the last stored output without clearing it.
+   * Used by the assist handler to include command output in the prompt.
+   */
+  getLastOutput(): string | null {
+    return this.lastOutput
   }
 
   /**

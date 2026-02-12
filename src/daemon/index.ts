@@ -42,6 +42,16 @@ const sessionMemoryKeys = new Map<string, MemoryKey>()
 // Suppress repeated API key warnings
 let apiKeyWarned = false
 
+// Ring buffer of recent assist interactions so ambient remembers what it said
+interface AssistEntry {
+  readonly command: string
+  readonly exitCode: number
+  readonly response: string
+  readonly timestamp: number
+}
+const recentAssists: AssistEntry[] = []
+const MAX_RECENT_ASSISTS = 5
+
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
 
@@ -495,6 +505,12 @@ async function handleRequest(
       const contextBlock = context.formatForPrompt()
       const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
 
+      // Include captured command output — prefer direct payload, fall back to stored
+      const rawOutput = payload.output ?? context.getLastOutput()
+      const outputBlock = rawOutput
+        ? `\nRecent command output (last lines):\n${rawOutput.slice(-3000)}`
+        : ""
+
       // Include recent command history
       const ctx = context.getContext()
       const recentHistory = ctx.recentCommands.slice(-20)
@@ -508,6 +524,13 @@ async function handleRequest(
       const assistMemory = searchAllMemory(userInput)
       const memorySection = assistMemory ? `\nYour long-term memory (persists across sessions — this is what you remember):\n${assistMemory}` : ""
 
+      // Include ambient's own recent interactions so it can refer back to what it said
+      const assistHistoryBlock = recentAssists.length > 0
+        ? "\nRecent ambient interactions:\n" + recentAssists
+            .map(a => `  User typed: \`${a.command}\` (exit ${a.exitCode}) → ambient said: "${a.response.slice(0, 200)}"`)
+            .join("\n")
+        : ""
+
       // Classify the input — exit 127 is always conversational (command not found).
       // For other exit codes, apply heuristic detection as a safety net for when
       // the ZLE widget doesn't catch natural language (e.g. edge cases).
@@ -517,11 +540,11 @@ async function handleRequest(
       const assistPrompt = `You are "ambient", a friendly AI companion that lives in the user's terminal. You have persistent memory about their projects and can see their shell activity.
 
 The user typed: \`${input}\`
-${isConversational ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}
+${isConversational ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}${outputBlock}
 
 [Current session context]
 ${contextBlock}${historyBlock}
-${memorySection}
+${memorySection}${assistHistoryBlock}
 
 How to respond:
 ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
@@ -556,6 +579,21 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
       if (!ok) {
         log("warn", "Haiku streaming call failed")
       }
+
+      // Store in ring buffer so ambient remembers what it said
+      const fullAssistResponse = assistChunks.join("")
+      if (fullAssistResponse) {
+        recentAssists.push({
+          command: payload.command,
+          exitCode: payload.exitCode,
+          response: fullAssistResponse,
+          timestamp: Date.now(),
+        })
+        if (recentAssists.length > MAX_RECENT_ASSISTS) {
+          recentAssists.shift()
+        }
+      }
+
       sendResponse(socket, { type: "done", data: "" })
 
       // Record the interaction as a memory event (async, non-blocking)

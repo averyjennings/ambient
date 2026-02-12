@@ -353,8 +353,8 @@ async function main(): Promise<void> {
     const exitCode = parseInt(args[2] ?? "1", 10)
     if (!failedCommand) return
 
-    // Try to read stderr from stdin if piped
-    const stderrInput = await readStdin()
+    // Read captured command output from stdin if piped
+    const capturedOutput = await readStdin()
 
     await ensureDaemonRunning()
     await sendRequest({
@@ -363,7 +363,7 @@ async function main(): Promise<void> {
         command: failedCommand,
         exitCode,
         cwd: process.cwd(),
-        stderr: stderrInput,
+        output: capturedOutput,
       },
     })
     return
