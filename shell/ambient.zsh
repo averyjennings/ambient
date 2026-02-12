@@ -121,6 +121,14 @@ _ambient_accept_line() {
   local buf="$BUFFER"
   [[ -z "$buf" ]] && { zle .accept-line; return }
 
+  # If the first word is a real command in PATH, always let it through.
+  # This prevents intercepting `ambient "what's wrong?"` or `curl "url?"`.
+  local first_word="${buf%% *}"
+  if whence -p "$first_word" &>/dev/null; then
+    zle .accept-line
+    return
+  fi
+
   local is_natural=0
 
   # 1. Unmatched apostrophes that look like contractions (what's, don't, I'm)
@@ -135,24 +143,17 @@ _ambient_accept_line() {
   #    Exception: single-word glob patterns like *.? or file?
   if (( is_natural == 0 )) && [[ "$buf" == *"?"* ]]; then
     local word_count=${#${=buf}}
-    # Multi-word input with ? is natural language
     if (( word_count >= 2 )); then
       is_natural=1
     fi
   fi
 
-  # 3. Starts with a conversational word (2+ words, first word isn't a real command)
-  if (( is_natural == 0 )); then
-    local first_word="${buf%% *}"
+  # 3. Starts with a conversational word (2+ words only)
+  if (( is_natural == 0 )) && [[ "$buf" == *" "* ]]; then
     local lower_first="${first_word:l}"
     case "$lower_first" in
       what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
-        # Only if multi-word AND the first word isn't an external command.
-        # whence -p checks PATH only (not builtins/functions/aliases), so
-        # "ambient daemon stop" passes through but "help me fix this" is caught.
-        if [[ "$buf" == *" "* ]] && ! whence -p "$first_word" &>/dev/null; then
-          is_natural=1
-        fi
+        is_natural=1
         ;;
     esac
   fi
