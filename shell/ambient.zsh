@@ -123,14 +123,7 @@ _ambient_accept_line() {
   local buf="$BUFFER"
   [[ -z "$buf" ]] && { zle .accept-line; return }
 
-  # If the first word is a real command in PATH, always let it through.
-  # This prevents intercepting `ambient "what's wrong?"` or `curl "url?"`.
   local first_word="${buf%% *}"
-  if whence -p "$first_word" &>/dev/null; then
-    zle .accept-line
-    return
-  fi
-
   local is_natural=0
 
   # 1. Unmatched apostrophes that look like contractions (what's, don't, I'm)
@@ -141,8 +134,7 @@ _ambient_accept_line() {
     fi
   fi
 
-  # 2. Contains ? — almost always natural language, rarely a real command
-  #    Exception: single-word glob patterns like *.? or file?
+  # 2. Contains ? in a multi-word context — almost always natural language
   if (( is_natural == 0 )) && [[ "$buf" == *"?"* ]]; then
     local word_count=${#${=buf}}
     if (( word_count >= 2 )); then
@@ -160,6 +152,7 @@ _ambient_accept_line() {
     esac
   fi
 
+  # If it looks like natural language, route to ambient
   if (( is_natural == 1 )); then
     print
     printf '\033[2m\033[33m  ambient → '
@@ -170,6 +163,7 @@ _ambient_accept_line() {
     return
   fi
 
+  # Not NL — let zsh handle it normally
   zle .accept-line
 }
 zle -N accept-line _ambient_accept_line
