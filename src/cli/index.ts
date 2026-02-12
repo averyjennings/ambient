@@ -369,6 +369,69 @@ async function main(): Promise<void> {
     return
   }
 
+  // Store a memory — usable by any agent via shell command
+  // Usage: r remember "Chose JWT for auth" [--type decision|task-update|error-resolution] [--importance high|medium|low]
+  if (args[0] === "remember") {
+    const memArgs = args.slice(1)
+    let eventType = "decision" as import("../types/index.js").MemoryEventType
+    let importance = "high" as import("../types/index.js").MemoryImportance
+    const contentParts: string[] = []
+
+    const validTypes = new Set(["decision", "error-resolution", "task-update", "file-context", "session-summary"])
+    const validImportance = new Set(["low", "medium", "high"])
+
+    for (let i = 0; i < memArgs.length; i++) {
+      if (memArgs[i] === "--type" && memArgs[i + 1]) {
+        const t = memArgs[i + 1]!
+        if (!validTypes.has(t)) {
+          console.error(`Invalid type: ${t}. Valid: decision, task-update, error-resolution, file-context, session-summary`)
+          process.exit(1)
+        }
+        eventType = t as import("../types/index.js").MemoryEventType
+        i++
+      } else if (memArgs[i] === "--importance" && memArgs[i + 1]) {
+        const imp = memArgs[i + 1]!
+        if (!validImportance.has(imp)) {
+          console.error(`Invalid importance: ${imp}. Valid: low, medium, high`)
+          process.exit(1)
+        }
+        importance = imp as import("../types/index.js").MemoryImportance
+        i++
+      } else {
+        contentParts.push(memArgs[i]!)
+      }
+    }
+
+    const content = contentParts.join(" ")
+    if (!content) {
+      console.error('Usage: r remember "what to remember" [--type decision] [--importance high]')
+      process.exit(1)
+    }
+
+    await ensureDaemonRunning()
+    await sendRequest({
+      type: "memory-store",
+      payload: {
+        cwd: process.cwd(),
+        eventType,
+        content,
+        importance,
+      },
+    })
+    console.log(`Remembered: ${content}`)
+    return
+  }
+
+  // List stored memories for the current project/branch
+  if (args[0] === "memory") {
+    await ensureDaemonRunning()
+    await sendRequest({
+      type: "memory-read",
+      payload: { cwd: process.cwd() },
+    })
+    return
+  }
+
   if (args[0] === "--help" || args[0] === "-h" || args.length === 0) {
     printUsage()
     return
@@ -470,6 +533,11 @@ function printUsage(): void {
   r agents                           List available agents
   r -a codex <query>                 Use a specific agent
   r compare -a claude,gemini <query> Compare responses from multiple agents
+
+\x1b[1mMemory:\x1b[0m
+  r remember "fact or decision"      Store a long-term memory
+  r remember --type task-update "x"  Store with specific type
+  r memory                           Show memories for current project
 
 \x1b[1mDaemon:\x1b[0m
   r daemon start                     Start the background daemon

@@ -16,9 +16,16 @@ Ambient is your persistent memory layer. It remembers decisions, tasks, and erro
 - Use \`get_decisions\` to recall past architectural decisions.
 
 ### Writing memories (do this proactively)
-- **\`store_decision\`**: When you make or help make an important decision (architecture, library choice, design pattern), record it. Include brief reasoning.
-- **\`store_task_update\`**: When starting or completing a task, record what you're working on and its status.
-- **\`store_error_resolution\`**: When you diagnose and fix an error, record both the error and the fix so future sessions can reference it.
+
+**If ambient MCP tools are available** (look for \`store_decision\`, \`store_task_update\`, \`store_error_resolution\`):
+- **\`store_decision\`**: Record important decisions (architecture, library choice, design pattern). Include brief reasoning.
+- **\`store_task_update\`**: Record task starts and completions.
+- **\`store_error_resolution\`**: Record errors and how they were fixed.
+
+**If MCP tools are NOT available**, use the shell command instead:
+- \`ambient remember "Chose JWT with refresh tokens for auth"\` — stores as a decision
+- \`ambient remember --type task-update "Implementing rate limiting"\` — stores as task update
+- \`ambient remember --type error-resolution "Fixed CORS by adding allowed origins"\` — stores error fix
 
 ### When to write
 - Record decisions as you make them, not at the end of a session.
