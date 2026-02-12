@@ -348,28 +348,42 @@ async function handleRequest(
       }
 
       const contextBlock = context.formatForPrompt()
-      const stderrBlock = payload.stderr ? `\nError output:\n${payload.stderr.slice(-1000)}` : ""
+      const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
 
-      // Include recent command history (last 20, both successes and failures)
-      // so the LLM understands what the user has been doing
+      // Include recent command history
       const ctx = context.getContext()
       const recentHistory = ctx.recentCommands.slice(-20)
         .map(c => `  ${c.exitCode === 0 ? "✓" : "✗"} \`${c.command}\`${c.exitCode !== 0 ? ` (exit ${c.exitCode})` : ""}`)
         .join("\n")
       const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
 
-      const assistPrompt = `You are "ambient", an AI assistant that lives in the user's terminal. You can see everything they've been doing.
+      // Include persistent memory so ambient knows what it knows
+      const memKey = resolveMemoryKey(payload.cwd)
+      const memoryBlock = formatMemoryForPrompt(memKey)
+      const memorySection = memoryBlock ? `\nYour memory (things you remember about this project):\n${memoryBlock}` : ""
 
-The user typed: \`${payload.command}\`
-Exit code: ${payload.exitCode}${stderrBlock}
+      // Classify the input to adjust the prompt framing
+      const isCommandNotFound = payload.exitCode === 127
+      const input = payload.command
 
-${contextBlock}${historyBlock}
+      const assistPrompt = `You are "ambient", a friendly AI companion that lives in the user's terminal. You have persistent memory about their projects and can see their shell activity.
 
-Instructions:
-- If the input is NATURAL LANGUAGE (a question, request, or conversation): answer it directly using the terminal context and command history above. DO NOT tell them to run \`history\` — YOU already have their history, so just answer from it.
-- If the input is a MISTYPED COMMAND: suggest the correct command.
+The user typed: \`${input}\`
+${isCommandNotFound ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}
 
-Reply in 1-3 short plain text lines. No markdown, no code fences.`
+${contextBlock}${historyBlock}${memorySection}
+
+How to respond:
+${isCommandNotFound ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
+- If they're greeting you, greet them back warmly.
+- If they're asking a question, answer it using your memory and their terminal context.
+- If they ask about "your context" or "what you know", share what you remember from your memory section above.
+- If it looks like a mistyped command (e.g. "gti status"), suggest the correction.
+- Do NOT explain that their input "failed" or "wasn't a command" — they know they're talking to you.` : `- This was a real command that failed. Help them fix it.
+- If there's stderr output, diagnose the specific error.
+- Suggest the corrected command or a fix.`}
+- Be concise: 1-4 plain text lines. No markdown, no code fences.
+- Be warm and natural, not robotic.`
 
       if (!process.env["ANTHROPIC_API_KEY"]) {
         sendResponse(socket, { type: "chunk", data: "Auto-assist requires ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-ant-...` to your ~/.zshrc" })
@@ -379,7 +393,7 @@ Reply in 1-3 short plain text lines. No markdown, no code fences.`
         break
       }
 
-      log("info", `Auto-assist for \`${payload.command}\` (exit ${payload.exitCode}) via Haiku streaming`)
+      log("info", `Auto-assist for \`${input}\` (exit ${payload.exitCode}, ${isCommandNotFound ? "conversation" : "error"}) via Haiku streaming`)
 
       // Stream Haiku response — first tokens arrive in ~200-300ms
       const ok = await streamFastLlm(assistPrompt, (text) => {

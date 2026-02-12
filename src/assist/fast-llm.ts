@@ -28,7 +28,7 @@ export async function streamFastLlm(
   if (!apiKey) return false
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
+  const timeout = setTimeout(() => controller.abort(), 10_000)
 
   try {
     const response = await fetch(API_URL, {
@@ -47,7 +47,11 @@ export async function streamFastLlm(
       signal: controller.signal,
     })
 
-    if (!response.ok || !response.body) return false
+    if (!response.ok || !response.body) {
+      const errorBody = response.body ? await response.text().catch(() => "") : ""
+      process.stderr.write(`[ambient] Haiku API error: ${response.status} ${errorBody.slice(0, 200)}\n`)
+      return false
+    }
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -81,7 +85,9 @@ export async function streamFastLlm(
     }
 
     return true
-  } catch {
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[ambient] Haiku stream error: ${msg}\n`)
     return false
   } finally {
     clearTimeout(timeout)
