@@ -58,6 +58,26 @@ _ambient_json_escape() {
   printf '%s' "$s"
 }
 
+# --- Output capture state ---
+# Captures stdout+stderr so ambient can answer questions about recent output.
+# Uses exec+tee with FORCE_COLOR to preserve colors. Commands that depend on
+# a real TTY (pagers, git/delta, editors, REPLs) are skipped.
+_ambient_capture_file=""
+_ambient_stdout_save=0
+_ambient_stderr_save=0
+_ambient_last_output=""
+
+# Commands to skip — anything that uses a pager, TUI, or checks isatty() in
+# ways that FORCE_COLOR can't fix (e.g. delta, less, interactive REPLs).
+_ambient_nocapture="vim nvim vi nano emacs less more man bat ssh top htop btop watch tmux screen python3 python node irb git gh lazygit tig"
+
+_ambient_should_capture() {
+  local first="${1%% *}"
+  first="${first##*/}"  # strip path prefix (e.g. /usr/bin/git → git)
+  [[ " $_ambient_nocapture " == *" $first "* ]] && return 1
+  return 0
+}
+
 # --- Auto-assist state ---
 _ambient_last_command=""
 _ambient_handled_by_cnf=0  # flag: command_not_found_handler already responded
@@ -85,6 +105,17 @@ command_not_found_handler() {
 _ambient_preexec() {
   _ambient_last_command="$1"
   _ambient_handled_by_cnf=0
+  _ambient_last_output=""
+
+  # Set up output capture for commands that don't need a real TTY
+  if _ambient_should_capture "$1"; then
+    _ambient_capture_file=$(mktemp /tmp/ambient-cap.XXXXXX)
+    # Save original FDs, then redirect through tee
+    exec {_ambient_stdout_save}>&1 {_ambient_stderr_save}>&2
+    exec > >(tee -ia "$_ambient_capture_file") 2> >(tee -ia "$_ambient_capture_file" >&2)
+    # Tell CLI tools to emit colors even though stdout is now a pipe
+    export FORCE_COLOR=1 CLICOLOR_FORCE=1
+  fi
 
   local cmd="$(_ambient_json_escape "$1")"
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"preexec\",\"command\":\"${cmd}\",\"cwd\":\"$PWD\"}}"
@@ -94,13 +125,30 @@ _ambient_preexec() {
 _ambient_precmd() {
   local exit_code=$?
 
+  # --- Restore output capture (must run FIRST) ---
+  # Always check — even after a `reload` that redefines this function,
+  # the FD save vars persist and need cleanup.
+  if (( _ambient_stdout_save > 0 )); then
+    exec 1>&$_ambient_stdout_save 2>&$_ambient_stderr_save
+    exec {_ambient_stdout_save}>&- {_ambient_stderr_save}>&-
+    _ambient_stdout_save=0
+    _ambient_stderr_save=0
+    unset FORCE_COLOR CLICOLOR_FORCE
+  fi
+  if [[ -n "$_ambient_capture_file" && -f "$_ambient_capture_file" ]]; then
+    sleep 0.02  # let tee's process substitution flush
+    _ambient_last_output=$(tail -200 "$_ambient_capture_file" 2>/dev/null | head -c 10000 | tr -cd '[:print:][:space:]')
+    rm -f "$_ambient_capture_file"
+    _ambient_capture_file=""
+    # Send captured output to daemon (async, for later queries)
+    if [[ -n "$_ambient_last_output" ]]; then
+      local escaped_output="$(_ambient_json_escape "$_ambient_last_output")"
+      _ambient_notify "{\"type\":\"capture\",\"payload\":{\"output\":\"${escaped_output}\",\"cwd\":\"$PWD\"}}"
+    fi
+  fi
+
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
-
-  # Auto-assist is intentionally NOT triggered for general command failures.
-  # Exit 127 (command not found) is handled by command_not_found_handler above.
-  # Natural language is caught by the ZLE accept-line widget.
-  # For real command errors, the user can explicitly ask: `r fix`
 }
 
 # chpwd: runs when the directory changes
