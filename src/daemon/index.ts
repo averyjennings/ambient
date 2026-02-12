@@ -370,9 +370,11 @@ async function handleRequest(
         break
       }
 
-      // Rate limit: 1 assist per 5 seconds
+      // Rate limit auto-assist (error help), but NOT intentional conversation.
+      // Exit 127 = user typed something that wasn't a command — they're talking to us.
       const now = Date.now()
-      if (now - lastAssistTime < 5_000) {
+      const isIntentional = payload.exitCode === 127
+      if (!isIntentional && now - lastAssistTime < 5_000) {
         sendResponse(socket, { type: "done", data: "" })
         break
       }
