@@ -30,6 +30,7 @@ import { streamFastLlm } from "../assist/fast-llm.js"
 import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
+import { ensureAmbientInstructions } from "../setup/claude-md.js"
 
 const context = new ContextEngine()
 const contextFileGen = new ContextFileGenerator()
@@ -523,6 +524,12 @@ async function startDaemon(): Promise<void> {
   // Detect available agents on startup
   availableAgents = await detectAvailableAgents()
   log("info", `Available agents: ${availableAgents.join(", ") || "none detected"}`)
+
+  // Ensure global CLAUDE.md has ambient memory instructions
+  const added = ensureAmbientInstructions()
+  if (added) {
+    log("info", "Added ambient memory instructions to global CLAUDE.md")
+  }
 
   // Migrate legacy memory files to two-level format
   migrateIfNeeded()
