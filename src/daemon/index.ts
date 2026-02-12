@@ -39,8 +39,8 @@ const contextFileGen = new ContextFileGenerator()
 const sessions = new Map<string, SessionState>()
 const sessionMemoryKeys = new Map<string, MemoryKey>()
 
-// Rate-limit auto-assist (1 per 10 seconds)
-let lastAssistTime = 0
+// Suppress repeated API key warnings
+let apiKeyWarned = false
 
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
@@ -370,15 +370,8 @@ async function handleRequest(
         break
       }
 
-      // Rate limit auto-assist (error help), but NOT intentional conversation.
-      // Exit 127 = user typed something that wasn't a command — they're talking to us.
-      const now = Date.now()
-      const isIntentional = payload.exitCode === 127
-      if (!isIntentional && now - lastAssistTime < 5_000) {
-        sendResponse(socket, { type: "done", data: "" })
-        break
-      }
-      lastAssistTime = now
+      // No rate limiting — the user controls when they invoke ambient.
+      // The 4-second perl alarm in ambient.zsh already prevents runaway calls.
 
       if (payload.cwd) {
         context.update({ event: "chpwd", cwd: payload.cwd })
@@ -425,10 +418,11 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
 - Be warm and natural, not robotic.`
 
       if (!process.env["ANTHROPIC_API_KEY"]) {
-        sendResponse(socket, { type: "chunk", data: "Auto-assist requires ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-ant-...` to your ~/.zshrc" })
+        if (!apiKeyWarned) {
+          sendResponse(socket, { type: "chunk", data: "Auto-assist requires ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-ant-...` to your ~/.zshrc" })
+          apiKeyWarned = true
+        }
         sendResponse(socket, { type: "done", data: "" })
-        // Only warn once per daemon lifetime
-        lastAssistTime = Infinity
         break
       }
 
