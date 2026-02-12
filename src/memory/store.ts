@@ -1,26 +1,27 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { createHash } from "node:crypto"
+import type { MemoryEvent, MemoryKey, ProjectMemory, TaskMemory } from "../types/index.js"
 
-export interface MemoryEntry {
-  /** The directory this memory is associated with */
+// --- Legacy interface (kept for migration) ---
+
+export interface LegacyMemoryEntry {
   directory: string
-  /** Which agent was last used */
   lastAgent: string
-  /** Timestamp of last activity */
   lastActive: number
-  /** Short summary of the last session */
   summary: string
-  /** Key facts about the project/conversation */
   facts: string[]
 }
 
-const MAX_SUMMARY_LENGTH = 500
-const MAX_FACTS = 10
-const MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// --- Constants ---
 
-function getMemoryDir(): string {
+const MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1_000 // 30 days
+const MAX_PROJECT_EVENTS = 50
+const MAX_TASK_EVENTS = 100
+
+// --- Directory helpers ---
+
+function getMemoryBaseDir(): string {
   const dir = join(homedir(), ".ambient", "memory")
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
@@ -28,71 +29,297 @@ function getMemoryDir(): string {
   return dir
 }
 
-function hashDirectory(directory: string): string {
-  return createHash("sha256").update(directory).digest("hex").slice(0, 16)
+export function getProjectDir(projectKey: string): string {
+  const dir = join(getMemoryBaseDir(), "projects", projectKey)
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
 }
 
-function getMemoryPath(directory: string): string {
-  return join(getMemoryDir(), `${hashDirectory(directory)}.json`)
+function getTasksDir(projectKey: string): string {
+  const dir = join(getProjectDir(projectKey), "tasks")
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
 }
 
-export function loadMemory(directory: string): MemoryEntry | null {
-  const path = getMemoryPath(directory)
+function getArchivedDir(projectKey: string): string {
+  const dir = join(getProjectDir(projectKey), "archived")
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
+function getProjectPath(projectKey: string): string {
+  return join(getProjectDir(projectKey), "project.json")
+}
+
+function getTaskPath(projectKey: string, taskKey: string): string {
+  return join(getTasksDir(projectKey), `${taskKey}.json`)
+}
+
+export function getArchivedPath(projectKey: string, taskKey: string): string {
+  return join(getArchivedDir(projectKey), `${taskKey}.json`)
+}
+
+// --- Project-level operations ---
+
+export function loadProjectMemory(projectKey: string): ProjectMemory | null {
+  const path = getProjectPath(projectKey)
   if (!existsSync(path)) return null
 
   try {
     const raw = readFileSync(path, "utf-8")
-    const entry = JSON.parse(raw) as MemoryEntry
+    const memory = JSON.parse(raw) as ProjectMemory
 
-    // Skip stale memories
-    if (Date.now() - entry.lastActive > MEMORY_TTL_MS) {
+    if (Date.now() - memory.lastActive > MEMORY_TTL_MS) {
       return null
     }
-
-    return entry
+    return memory
   } catch {
     return null
   }
 }
 
-export function saveMemory(entry: MemoryEntry): void {
-  const path = getMemoryPath(entry.directory)
-
-  // Enforce limits
-  const trimmed: MemoryEntry = {
-    ...entry,
-    summary: entry.summary.slice(0, MAX_SUMMARY_LENGTH),
-    facts: entry.facts.slice(0, MAX_FACTS),
-    lastActive: Date.now(),
-  }
-
-  writeFileSync(path, JSON.stringify(trimmed, null, 2))
+export function saveProjectMemory(memory: ProjectMemory): void {
+  const path = getProjectPath(memory.projectKey)
+  getProjectDir(memory.projectKey) // ensure directory exists
+  writeFileSync(path, JSON.stringify(memory, null, 2))
 }
 
-/**
- * Format memory as context for prompt injection.
- * Returns null if no relevant memory exists.
- */
-export function formatMemoryForPrompt(directory: string): string | null {
-  const entry = loadMemory(directory)
-  if (!entry) return null
+export function addProjectEvent(projectKey: string, projectName: string, origin: string, event: MemoryEvent): void {
+  let memory = loadProjectMemory(projectKey)
 
-  const elapsed = Date.now() - entry.lastActive
-  const timeAgo = formatTimeAgo(elapsed)
-
-  const lines = [`Previous session (${timeAgo}, using ${entry.lastAgent}):`]
-  if (entry.summary) {
-    lines.push(entry.summary)
-  }
-  if (entry.facts.length > 0) {
-    lines.push("Key context:")
-    for (const fact of entry.facts) {
-      lines.push(`  - ${fact}`)
+  if (!memory) {
+    memory = {
+      projectKey,
+      projectName,
+      origin,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      events: [],
     }
   }
 
-  return lines.join("\n")
+  memory.events.push(event)
+  memory.lastActive = Date.now()
+
+  // Trim to limit (drop oldest low-importance events first)
+  if (memory.events.length > MAX_PROJECT_EVENTS) {
+    memory.events = trimEvents(memory.events, MAX_PROJECT_EVENTS)
+  }
+
+  saveProjectMemory(memory)
 }
+
+// --- Task-level operations ---
+
+export function loadTaskMemory(projectKey: string, taskKey: string): TaskMemory | null {
+  const path = getTaskPath(projectKey, taskKey)
+  if (!existsSync(path)) return null
+
+  try {
+    const raw = readFileSync(path, "utf-8")
+    const memory = JSON.parse(raw) as TaskMemory
+
+    if (Date.now() - memory.lastActive > MEMORY_TTL_MS) {
+      return null
+    }
+    return memory
+  } catch {
+    return null
+  }
+}
+
+export function saveTaskMemory(memory: TaskMemory): void {
+  const path = getTaskPath(memory.projectKey, memory.branchKey)
+  getTasksDir(memory.projectKey) // ensure directory exists
+  writeFileSync(path, JSON.stringify(memory, null, 2))
+}
+
+export function addTaskEvent(
+  projectKey: string,
+  taskKey: string,
+  branchName: string,
+  event: MemoryEvent,
+): void {
+  let memory = loadTaskMemory(projectKey, taskKey)
+
+  if (!memory) {
+    memory = {
+      branchKey: taskKey,
+      branchName,
+      projectKey,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      archived: false,
+      events: [],
+    }
+  }
+
+  memory.events.push(event)
+  memory.lastActive = Date.now()
+
+  if (memory.events.length > MAX_TASK_EVENTS) {
+    memory.events = trimEvents(memory.events, MAX_TASK_EVENTS)
+  }
+
+  saveTaskMemory(memory)
+}
+
+// --- Merged context for prompt injection ---
+
+/**
+ * Format merged project + task memory as context for prompt injection.
+ * Returns null if no relevant memory exists.
+ */
+export function formatMemoryForPrompt(key: MemoryKey): string | null {
+  const project = loadProjectMemory(key.projectKey)
+  const task = loadTaskMemory(key.projectKey, key.taskKey)
+
+  if (!project && !task) return null
+
+  const lines: string[] = []
+
+  if (project && project.events.length > 0) {
+    lines.push(`[Project: ${key.projectName}]`)
+    const relevant = project.events
+      .filter((e) => e.importance !== "low")
+      .slice(-10)
+    for (const event of relevant) {
+      const ago = formatTimeAgo(Date.now() - event.timestamp)
+      lines.push(`- ${event.content} (${event.type}, ${ago})`)
+    }
+  }
+
+  if (task && task.events.length > 0) {
+    if (lines.length > 0) lines.push("")
+    lines.push(`[Task: ${key.branchName}]`)
+    const relevant = task.events.slice(-15)
+    for (const event of relevant) {
+      const ago = formatTimeAgo(Date.now() - event.timestamp)
+      lines.push(`- ${event.content} (${event.type}, ${ago})`)
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null
+}
+
+// --- Lifecycle ---
+
+export function archiveTask(projectKey: string, taskKey: string): void {
+  const srcPath = getTaskPath(projectKey, taskKey)
+  if (!existsSync(srcPath)) return
+
+  const destPath = getArchivedPath(projectKey, taskKey)
+  try {
+    const memory = loadTaskMemory(projectKey, taskKey)
+    if (memory) {
+      memory.archived = true
+      writeFileSync(destPath, JSON.stringify(memory, null, 2))
+    }
+    unlinkSync(srcPath)
+  } catch {
+    // ignore archive errors
+  }
+}
+
+/**
+ * List all task keys in a project's tasks directory.
+ */
+export function listTaskKeys(projectKey: string): string[] {
+  const dir = join(getMemoryBaseDir(), "projects", projectKey, "tasks")
+  if (!existsSync(dir)) return []
+
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => f.replace(/\.json$/, ""))
+  } catch {
+    return []
+  }
+}
+
+// --- Cleanup ---
+
+/**
+ * Clean up stale memory files — both legacy flat files and new project dirs.
+ */
+export function cleanupStaleMemory(): void {
+  const baseDir = getMemoryBaseDir()
+
+  // Clean legacy flat files (*.json in base dir)
+  try {
+    for (const file of readdirSync(baseDir)) {
+      if (!file.endsWith(".json")) continue
+      const path = join(baseDir, file)
+      const stat = statSync(path)
+      if (Date.now() - stat.mtimeMs > MEMORY_TTL_MS) {
+        unlinkSync(path)
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Clean stale project dirs
+  const projectsDir = join(baseDir, "projects")
+  if (!existsSync(projectsDir)) return
+
+  try {
+    for (const projectDir of readdirSync(projectsDir)) {
+      const projectPath = join(projectsDir, projectDir, "project.json")
+      if (!existsSync(projectPath)) continue
+      const stat = statSync(projectPath)
+      if (Date.now() - stat.mtimeMs > MEMORY_TTL_MS) {
+        // Remove entire project directory (stale)
+        rmDirRecursive(join(projectsDir, projectDir))
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// --- Legacy support (for migration) ---
+
+export function loadLegacyMemory(filePath: string): LegacyMemoryEntry | null {
+  try {
+    const raw = readFileSync(filePath, "utf-8")
+    const entry = JSON.parse(raw) as LegacyMemoryEntry
+    // Validate it looks like the old format
+    if (typeof entry.directory === "string" && typeof entry.summary === "string") {
+      return entry
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function getLegacyMemoryFiles(): string[] {
+  const baseDir = getMemoryBaseDir()
+  try {
+    return readdirSync(baseDir)
+      .filter((f) => f.endsWith(".json") && !f.endsWith(".migrated"))
+      .map((f) => join(baseDir, f))
+  } catch {
+    return []
+  }
+}
+
+export function markLegacyMigrated(filePath: string): void {
+  try {
+    renameSync(filePath, `${filePath}.migrated`)
+  } catch {
+    // ignore
+  }
+}
+
+// --- Helpers ---
 
 function formatTimeAgo(ms: number): string {
   const minutes = Math.floor(ms / 60_000)
@@ -104,20 +331,27 @@ function formatTimeAgo(ms: number): string {
 }
 
 /**
- * Clean up memory files older than MEMORY_TTL_MS.
+ * Trim an event array to maxCount by removing oldest low-importance events first.
  */
-export function cleanupStaleMemory(): void {
-  const dir = getMemoryDir()
+function trimEvents(events: MemoryEvent[], maxCount: number): MemoryEvent[] {
+  if (events.length <= maxCount) return events
+
+  // Partition: high-importance events are protected
+  const high = events.filter((e) => e.importance === "high")
+  const rest = events.filter((e) => e.importance !== "high")
+
+  // Keep all high events + newest rest events to fill remaining space
+  const restBudget = maxCount - high.length
+  const keptRest = restBudget > 0 ? rest.slice(-restBudget) : []
+
+  // Re-sort by timestamp to maintain chronological order
+  return [...high, ...keptRest].sort((a, b) => a.timestamp - b.timestamp)
+}
+
+function rmDirRecursive(dirPath: string): void {
   try {
-    for (const file of readdirSync(dir)) {
-      if (!file.endsWith(".json")) continue
-      const path = join(dir, file)
-      const stat = statSync(path)
-      if (Date.now() - stat.mtimeMs > MEMORY_TTL_MS) {
-        unlinkSync(path)
-      }
-    }
+    rmSync(dirPath, { recursive: true, force: true })
   } catch {
-    // ignore cleanup errors
+    // ignore
   }
 }

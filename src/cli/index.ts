@@ -137,51 +137,7 @@ async function main(): Promise<void> {
   // Usage: Add to Claude Code's MCP config as: node /path/to/ambient/dist/cli/index.js mcp-serve
   if (args[0] === "mcp-serve") {
     const { startMcpServer } = await import("../mcp/server.js")
-    const { ContextEngine } = await import("../context/engine.js")
-
-    // Create a context engine that syncs from the daemon
-    const contextEngine = new ContextEngine()
-
-    // Try to load current context from daemon if running
-    if (isDaemonAlive()) {
-      try {
-        await new Promise<void>((resolve) => {
-          const socket = connect(getSocketPath())
-          socket.on("connect", () => {
-            socket.write(JSON.stringify({ type: "status", payload: {} }) + "\n")
-          })
-          let buf = ""
-          socket.on("data", (data) => {
-            buf += data.toString()
-            const lines = buf.split("\n")
-            buf = lines.pop() ?? ""
-            for (const line of lines) {
-              if (!line.trim()) continue
-              const response = JSON.parse(line) as DaemonResponse
-              if (response.type === "status" && response.data) {
-                const status = JSON.parse(response.data) as { cwd?: string; gitBranch?: string }
-                if (status.cwd) {
-                  contextEngine.update({ event: "chpwd", cwd: status.cwd, gitBranch: status.gitBranch })
-                }
-              }
-              if (response.type === "done") {
-                socket.end()
-                resolve()
-              }
-            }
-          })
-          socket.on("error", () => resolve())
-          setTimeout(() => resolve(), 1000)
-        })
-      } catch {
-        // Daemon not available — MCP server will work with default context
-      }
-    }
-
-    // Update context with current cwd at minimum
-    contextEngine.update({ event: "chpwd", cwd: process.cwd() })
-
-    await startMcpServer(contextEngine)
+    await startMcpServer()
     return
   }
 

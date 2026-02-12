@@ -17,3 +17,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+# Ambient context (auto-generated)
+.ambient/

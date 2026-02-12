@@ -1,18 +1,101 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
-import type { ContextEngine } from "../context/engine.js"
+import { sendDaemonRequest } from "./daemon-client.js"
+import { resolveMemoryKey } from "../memory/resolve.js"
+import { formatMemoryForPrompt, loadProjectMemory, loadTaskMemory, addTaskEvent, addProjectEvent } from "../memory/store.js"
+import type { ShellContext, MemoryEvent } from "../types/index.js"
+
+interface McpServerOptions {
+  cwd: string
+}
 
 /**
- * Creates an MCP server that exposes ambient's context engine
- * as resources and tools. This allows MCP-compatible agents to
- * access shell context in a structured way instead of through
- * prompt-prefix injection.
+ * Get live context from the daemon, with disk fallback.
  */
-export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer {
+async function getContext(cwd: string): Promise<{
+  context: ShellContext | null
+  formatted: string
+  memory: string | null
+}> {
+  const result = await sendDaemonRequest({
+    type: "context-read",
+    payload: { cwd },
+  })
+
+  if (result.ok && result.data) {
+    try {
+      const parsed = JSON.parse(result.data) as {
+        context: ShellContext
+        formattedContext: string
+        memory: string | null
+      }
+      return {
+        context: parsed.context,
+        formatted: parsed.formattedContext,
+        memory: parsed.memory,
+      }
+    } catch {
+      // Parse error — fall through to fallback
+    }
+  }
+
+  // Fallback: minimal context from filesystem
+  const memKey = resolveMemoryKey(cwd)
+  return {
+    context: null,
+    formatted: `Working directory: ${cwd}\n(daemon not running — limited context)`,
+    memory: formatMemoryForPrompt(memKey),
+  }
+}
+
+/**
+ * Write a memory event via daemon IPC, falling back to direct disk write.
+ */
+async function writeMemoryEvent(
+  cwd: string,
+  eventType: MemoryEvent["type"],
+  content: string,
+  importance: MemoryEvent["importance"],
+  metadata?: Record<string, string>,
+): Promise<string> {
+  const result = await sendDaemonRequest({
+    type: "memory-store",
+    payload: { cwd, eventType, content, importance, metadata },
+  })
+
+  if (result.ok) return "Memory recorded (via daemon)."
+
+  // Fallback: write directly to disk when daemon is down
+  const memKey = resolveMemoryKey(cwd)
+  const event: MemoryEvent = {
+    id: globalThis.crypto.randomUUID(),
+    type: eventType,
+    timestamp: Date.now(),
+    content: content.slice(0, 500),
+    importance,
+    metadata,
+  }
+
+  if (importance === "high") {
+    addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
+  }
+  addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
+
+  return "Memory recorded (direct to disk — daemon not running)."
+}
+
+/**
+ * Creates an MCP server that exposes ambient's memory and context
+ * to agents. Communicates with the daemon for live context, reads
+ * memory from disk as fallback.
+ */
+export function createAmbientMcpServer(options: McpServerOptions): McpServer {
+  const { cwd } = options
+
   const server = new McpServer({
     name: "ambient",
-    version: "0.1.0",
+    version: "0.2.0",
   })
 
   // --- Resources ---
@@ -20,25 +103,28 @@ export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer 
   server.resource(
     "shell-context",
     "ambient://context",
-    async () => ({
-      contents: [{
-        uri: "ambient://context",
-        mimeType: "application/json",
-        text: JSON.stringify(contextEngine.getContext(), null, 2),
-      }],
-    }),
+    async () => {
+      const { context, formatted } = await getContext(cwd)
+      return {
+        contents: [{
+          uri: "ambient://context",
+          mimeType: "application/json",
+          text: context ? JSON.stringify(context, null, 2) : formatted,
+        }],
+      }
+    },
   )
 
   server.resource(
     "command-history",
     "ambient://history",
     async () => {
-      const ctx = contextEngine.getContext()
+      const { context } = await getContext(cwd)
       return {
         contents: [{
           uri: "ambient://history",
           mimeType: "application/json",
-          text: JSON.stringify(ctx.recentCommands, null, 2),
+          text: JSON.stringify(context?.recentCommands ?? [], null, 2),
         }],
       }
     },
@@ -48,33 +134,64 @@ export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer 
     "project-info",
     "ambient://project",
     async () => {
-      const ctx = contextEngine.getContext()
+      const { context } = await getContext(cwd)
       return {
         contents: [{
           uri: "ambient://project",
           mimeType: "application/json",
           text: JSON.stringify({
-            type: ctx.projectType,
-            info: ctx.projectInfo,
-            cwd: ctx.cwd,
+            type: context?.projectType ?? null,
+            info: context?.projectInfo ?? null,
+            cwd,
           }, null, 2),
         }],
       }
     },
   )
 
-  // --- Tools ---
+  server.resource(
+    "project-memory",
+    "ambient://memory/project",
+    async () => {
+      const memKey = resolveMemoryKey(cwd)
+      const project = loadProjectMemory(memKey.projectKey)
+      return {
+        contents: [{
+          uri: "ambient://memory/project",
+          mimeType: "application/json",
+          text: JSON.stringify(project, null, 2),
+        }],
+      }
+    },
+  )
+
+  server.resource(
+    "task-memory",
+    "ambient://memory/task",
+    async () => {
+      const memKey = resolveMemoryKey(cwd)
+      const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+      return {
+        contents: [{
+          uri: "ambient://memory/task",
+          mimeType: "application/json",
+          text: JSON.stringify(task, null, 2),
+        }],
+      }
+    },
+  )
+
+  // --- Read tools ---
 
   server.tool(
     "get_shell_context",
     "Get the current shell context including cwd, git state, last command, and project info",
     {},
-    async () => ({
-      content: [{
-        type: "text" as const,
-        text: contextEngine.formatForPrompt(),
-      }],
-    }),
+    async () => {
+      const { formatted, memory } = await getContext(cwd)
+      const text = memory ? `${formatted}\n\n${memory}` : formatted
+      return { content: [{ type: "text" as const, text }] }
+    },
   )
 
   server.tool(
@@ -85,22 +202,18 @@ export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer 
       limit: z.number().optional().describe("Maximum number of commands to return (default: 20)"),
     },
     async ({ failuresOnly, limit }) => {
-      const ctx = contextEngine.getContext()
-      let commands = [...ctx.recentCommands]
-
+      const { context } = await getContext(cwd)
+      let commands = [...(context?.recentCommands ?? [])]
       if (failuresOnly) {
         commands = commands.filter((c) => c.exitCode !== 0)
       }
-
-      const maxResults = limit ?? 20
-      commands = commands.slice(-maxResults)
-
+      commands = commands.slice(-(limit ?? 20))
       return {
         content: [{
           type: "text" as const,
           text: commands.map((c) =>
             `[${new Date(c.timestamp).toISOString()}] ${c.command} → exit ${c.exitCode} (in ${c.cwd})`,
-          ).join("\n") || "No commands recorded",
+          ).join("\n") || "No commands recorded (daemon may not be running)",
         }],
       }
     },
@@ -111,28 +224,129 @@ export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer 
     "Get detected project type, available scripts/commands, package manager, and framework",
     {},
     async () => {
-      const ctx = contextEngine.getContext()
-      if (!ctx.projectInfo) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: "No project detected in current directory",
-          }],
-        }
+      const { context } = await getContext(cwd)
+      if (!context?.projectInfo) {
+        return { content: [{ type: "text" as const, text: "No project detected in current directory" }] }
       }
-
-      const info = ctx.projectInfo
+      const info = context.projectInfo
       const lines = [`Project type: ${info.type}`]
       if (info.packageManager) lines.push(`Package manager: ${info.packageManager}`)
       if (info.framework) lines.push(`Framework: ${info.framework}`)
       if (info.scripts.length > 0) lines.push(`Available scripts: ${info.scripts.join(", ")}`)
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] }
+    },
+  )
 
-      return {
-        content: [{
-          type: "text" as const,
-          text: lines.join("\n"),
-        }],
+  server.tool(
+    "get_task_context",
+    "Get merged project + task memory context for the current working directory and branch",
+    {},
+    async () => {
+      // Try daemon first for freshest data
+      const result = await sendDaemonRequest({
+        type: "memory-read",
+        payload: { cwd },
+      })
+
+      let text: string
+      if (result.ok && result.data) {
+        text = result.data
+      } else {
+        // Fallback: read from disk
+        const memKey = resolveMemoryKey(cwd)
+        text = formatMemoryForPrompt(memKey) ?? "No memory stored for this project/branch."
       }
+
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "get_decisions",
+    "Get decisions made for the current project and/or task",
+    {
+      scope: z.enum(["project", "task", "both"]).optional().describe("Which decisions to show (default: both)"),
+    },
+    async ({ scope }) => {
+      const memKey = resolveMemoryKey(cwd)
+      const effectiveScope = scope ?? "both"
+      const lines: string[] = []
+
+      if (effectiveScope === "project" || effectiveScope === "both") {
+        const project = loadProjectMemory(memKey.projectKey)
+        if (project) {
+          const decisions = project.events.filter((e) => e.type === "decision")
+          if (decisions.length > 0) {
+            lines.push(`[Project: ${memKey.projectName}]`)
+            for (const d of decisions) {
+              lines.push(`- ${d.content}`)
+            }
+          }
+        }
+      }
+
+      if (effectiveScope === "task" || effectiveScope === "both") {
+        const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+        if (task) {
+          const decisions = task.events.filter((e) => e.type === "decision")
+          if (decisions.length > 0) {
+            if (lines.length > 0) lines.push("")
+            lines.push(`[Task: ${memKey.branchName}]`)
+            for (const d of decisions) {
+              lines.push(`- ${d.content}`)
+            }
+          }
+        }
+      }
+
+      const text = lines.length > 0 ? lines.join("\n") : "No decisions recorded."
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  // --- Write tools ---
+
+  server.tool(
+    "store_decision",
+    "Record an important decision about the project or current task. Persists across sessions.",
+    {
+      decision: z.string().describe("The decision that was made"),
+      reasoning: z.string().optional().describe("Why this decision was made"),
+    },
+    async ({ decision, reasoning }) => {
+      const content = reasoning ? `${decision} (Reason: ${reasoning})` : decision
+      const text = await writeMemoryEvent(cwd, "decision", content, "high")
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "store_task_update",
+    "Record a task status update for the current branch. Persists across sessions.",
+    {
+      description: z.string().describe("What is being worked on"),
+      status: z.enum(["started", "in-progress", "completed", "blocked"]).optional().describe("Current status"),
+    },
+    async ({ description, status }) => {
+      const content = status ? `[${status}] ${description}` : description
+      const text = await writeMemoryEvent(cwd, "task-update", content, "medium")
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "store_error_resolution",
+    "Record how an error was resolved, so future sessions can reference it.",
+    {
+      error: z.string().describe("The error that occurred"),
+      resolution: z.string().describe("How it was resolved"),
+      file: z.string().optional().describe("File where the error occurred"),
+    },
+    async ({ error, resolution, file }) => {
+      const content = `Error: ${error}\nResolution: ${resolution}`
+      const metadata = file ? { file } : undefined
+      const text = await writeMemoryEvent(cwd, "error-resolution", content, "medium", metadata)
+      return { content: [{ type: "text" as const, text }] }
     },
   )
 
@@ -141,10 +355,11 @@ export function createAmbientMcpServer(contextEngine: ContextEngine): McpServer 
 
 /**
  * Start the MCP server on stdio transport.
- * This is used when an MCP-compatible agent needs to connect.
+ * cwd is inferred from the process — Claude Code spawns MCP servers
+ * in the project directory.
  */
-export async function startMcpServer(contextEngine: ContextEngine): Promise<void> {
-  const server = createAmbientMcpServer(contextEngine)
+export async function startMcpServer(): Promise<void> {
+  const server = createAmbientMcpServer({ cwd: process.cwd() })
   const transport = new StdioServerTransport()
   await server.connect(transport)
 }

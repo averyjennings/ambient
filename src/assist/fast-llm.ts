@@ -13,6 +13,7 @@
 const API_URL = "https://api.anthropic.com/v1/messages"
 const MODEL = "claude-haiku-4-5-20251001"
 const MAX_TOKENS = 200
+const COMPACT_MAX_TOKENS = 500
 
 /**
  * Stream a Haiku response, calling onChunk for each text token.
@@ -84,5 +85,44 @@ export async function streamFastLlm(
     return false
   } finally {
     clearTimeout(timeout)
+  }
+}
+
+/**
+ * Non-streaming wrapper around streamFastLlm. Collects all tokens
+ * and returns the full response text. Used by memory compaction.
+ *
+ * Uses a higher max_tokens limit (500) for compaction summaries.
+ * Returns null if the API key is missing or the call fails.
+ */
+export async function callFastLlm(prompt: string): Promise<string | null> {
+  const apiKey = process.env["ANTHROPIC_API_KEY"]
+  if (!apiKey) return null
+
+  try {
+    const response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: COMPACT_MAX_TOKENS,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+
+    if (!response.ok) return null
+
+    const result = await response.json() as {
+      content?: Array<{ type: string; text?: string }>
+    }
+    const text = result.content?.find((c) => c.type === "text")?.text
+    return text ?? null
+  } catch {
+    return null
   }
 }

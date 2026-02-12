@@ -90,8 +90,8 @@ export interface AssistPayload {
 }
 
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist"
-  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | Record<string, never>
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist" | "memory-store" | "memory-read" | "context-read"
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | MemoryStorePayload | MemoryReadPayload | ContextReadPayload | Record<string, never>
 }
 
 export interface QueryPayload {
@@ -136,4 +136,73 @@ export interface AmbientConfig {
   readonly maxRecentCommands: number
   readonly socketPath: string
   readonly logLevel: "debug" | "info" | "warn" | "error"
+}
+
+// --- Two-level memory system ---
+
+export type MemoryEventType =
+  | "decision"
+  | "error-resolution"
+  | "task-update"
+  | "file-context"
+  | "session-summary"
+
+export type MemoryImportance = "low" | "medium" | "high"
+
+export interface MemoryEvent {
+  readonly id: string
+  readonly type: MemoryEventType
+  readonly timestamp: number
+  readonly content: string
+  readonly importance: MemoryImportance
+  readonly metadata?: Readonly<Record<string, string>>
+}
+
+/** Project-level memory — shared across all branches */
+export interface ProjectMemory {
+  readonly projectKey: string
+  readonly projectName: string
+  readonly origin: string
+  readonly createdAt: number
+  lastActive: number
+  events: MemoryEvent[]
+}
+
+/** Task-level memory — scoped to a single branch */
+export interface TaskMemory {
+  readonly branchKey: string
+  readonly branchName: string
+  readonly projectKey: string
+  readonly createdAt: number
+  lastActive: number
+  archived: boolean
+  events: MemoryEvent[]
+}
+
+/** Resolved key for the two-level memory hierarchy */
+export interface MemoryKey {
+  readonly projectKey: string
+  readonly taskKey: string
+  readonly projectName: string
+  readonly branchName: string
+  readonly origin: string
+}
+
+// --- Memory IPC payloads ---
+
+export interface MemoryStorePayload {
+  readonly cwd: string
+  readonly eventType: MemoryEventType
+  readonly content: string
+  readonly importance?: MemoryImportance
+  readonly metadata?: Record<string, string>
+}
+
+export interface MemoryReadPayload {
+  readonly cwd: string
+  readonly scope?: "project" | "task" | "both"
+}
+
+export interface ContextReadPayload {
+  readonly cwd?: string
 }

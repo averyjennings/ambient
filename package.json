@@ -12,6 +12,8 @@
     "dev": "tsc --watch",
     "start:daemon": "node dist/daemon/index.js",
     "reload": "tsc && node dist/cli/index.js daemon stop 2>/dev/null; node dist/cli/index.js daemon start && echo '✓ ambient reloaded. Run: source shell/ambient.zsh (only needed if shell hooks changed)'",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
@@ -24,7 +26,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^4.0.18"
   },
   "private": true,
   "license": "MIT"

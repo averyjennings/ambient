@@ -2,7 +2,6 @@
 
 import { createServer } from "node:net"
 import { existsSync, unlinkSync, writeFileSync } from "node:fs"
-import { execFileSync } from "node:child_process"
 import { ContextEngine } from "../context/engine.js"
 import { routeToAgent } from "../agents/router.js"
 import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
@@ -12,70 +11,59 @@ import type {
   AssistPayload,
   CapturePayload,
   ComparePayload,
+  ContextReadPayload,
   ContextUpdatePayload,
   DaemonRequest,
   DaemonResponse,
+  MemoryKey,
+  MemoryReadPayload,
+  MemoryStorePayload,
   NewSessionPayload,
   QueryPayload,
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, saveMemory, cleanupStaleMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory } from "../memory/store.js"
+import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
+import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm } from "../assist/fast-llm.js"
+import { ContextFileGenerator } from "../memory/context-file.js"
+import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
+import { processMergedBranches } from "../memory/lifecycle.js"
 
 const context = new ContextEngine()
+const contextFileGen = new ContextFileGenerator()
 
-// Per-directory session state — keyed by git root or cwd
+// Per-branch session state — keyed by "projectKey:taskKey"
 const sessions = new Map<string, SessionState>()
-
-// Cache git root lookups to avoid repeated subprocess calls
-const gitRootCache = new Map<string, string>()
+const sessionMemoryKeys = new Map<string, MemoryKey>()
 
 // Rate-limit auto-assist (1 per 10 seconds)
 let lastAssistTime = 0
 
-function resolveSessionKey(cwd: string): string {
-  if (gitRootCache.has(cwd)) {
-    return gitRootCache.get(cwd)!
-  }
-
-  try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf-8",
-      timeout: 1000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim()
-    gitRootCache.set(cwd, root)
-    return root
-  } catch {
-    gitRootCache.set(cwd, cwd)
-    return cwd
-  }
-}
-
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
 
+function sessionKeyFromMemoryKey(key: MemoryKey): string {
+  return `${key.projectKey}:${key.taskKey}`
+}
+
 /**
- * Save a session's last response as persistent memory for the directory.
- * Uses the last response truncated as a summary (a proper summarization
- * step could be added later by querying the agent).
+ * Save a session's last response as a memory event for the current task.
  */
-function persistSessionMemory(directory: string, session: SessionState): void {
+function persistSessionMemory(key: MemoryKey, session: SessionState): void {
   if (!session.lastResponse || session.queryCount < 1) return
 
-  // Use the first 500 chars of the last response as a rough summary
   const summary = session.lastResponse.slice(0, 500).trimEnd()
 
-  saveMemory({
-    directory,
-    lastAgent: session.agentName,
-    lastActive: Date.now(),
-    summary,
-    facts: [],
+  addTaskEvent(key.projectKey, key.taskKey, key.branchName, {
+    id: globalThis.crypto.randomUUID(),
+    type: "session-summary",
+    timestamp: Date.now(),
+    content: summary,
+    importance: "low",
   })
-  log("info", `Saved memory for ${directory}`)
+  log("info", `Saved memory for ${key.projectName}:${key.branchName}`)
 }
 
 function log(level: string, msg: string): void {
@@ -99,8 +87,8 @@ async function handleRequest(
 
     case "status": {
       const ctx = context.getContext()
-      const sessionKey = resolveSessionKey(ctx.cwd)
-      const currentSession = sessions.get(sessionKey)
+      const memKey = resolveMemoryKey(ctx.cwd)
+      const currentSession = sessions.get(sessionKeyFromMemoryKey(memKey))
       sendResponse(socket, {
         type: "status",
         data: JSON.stringify({
@@ -127,6 +115,23 @@ async function handleRequest(
     case "context-update": {
       const payload = request.payload as ContextUpdatePayload
       context.update(payload)
+
+      // Trigger context file regeneration
+      const gitRoot = resolveGitRoot(payload.cwd)
+      if (gitRoot) {
+        const memKey = resolveMemoryKey(payload.cwd)
+        const shellCtx = context.getContext()
+        if (payload.event === "chpwd") {
+          contextFileGen.regenerateNow(gitRoot, shellCtx, memKey)
+          // Check for merged branches on directory change (runs async)
+          setTimeout(() => {
+            processMergedBranches(gitRoot, memKey.projectKey, memKey.projectName, memKey.origin)
+          }, 0)
+        } else if (payload.event === "precmd") {
+          contextFileGen.scheduleRegeneration(gitRoot, shellCtx, memKey)
+        }
+      }
+
       sendResponse(socket, { type: "done", data: "ok" })
       break
     }
@@ -134,13 +139,22 @@ async function handleRequest(
     case "new-session": {
       const payload = request.payload as NewSessionPayload
       const cwd = payload.cwd ?? context.getContext().cwd
-      const key = resolveSessionKey(cwd)
-      const existingSession = sessions.get(key)
+      const memKey = resolveMemoryKey(cwd)
+      const sKey = sessionKeyFromMemoryKey(memKey)
+      const existingSession = sessions.get(sKey)
       if (existingSession) {
-        persistSessionMemory(key, existingSession)
+        persistSessionMemory(memKey, existingSession)
       }
-      sessions.delete(key)
-      log("info", `Session reset for ${key}`)
+      sessions.delete(sKey)
+      sessionMemoryKeys.delete(sKey)
+
+      // Regenerate context file for new session
+      const gitRoot = resolveGitRoot(cwd)
+      if (gitRoot) {
+        contextFileGen.regenerateNow(gitRoot, context.getContext(), memKey)
+      }
+
+      log("info", `Session reset for ${memKey.projectName}:${memKey.branchName}`)
       sendResponse(socket, { type: "done", data: "ok" })
       break
     }
@@ -171,16 +185,18 @@ async function handleRequest(
         agentName = config.defaultAgent
       }
 
-      // Resolve per-directory session
-      const sessionKey = resolveSessionKey(payload.cwd)
-      let session = sessions.get(sessionKey) ?? null
+      // Resolve per-branch session
+      const memKey = resolveMemoryKey(payload.cwd)
+      const sKey = sessionKeyFromMemoryKey(memKey)
+      let session = sessions.get(sKey) ?? null
 
       // If agent changed or --new was passed, save memory and reset session
       if (payload.newSession || (session && session.agentName !== agentName)) {
         if (session) {
-          persistSessionMemory(sessionKey, session)
+          persistSessionMemory(memKey, session)
         }
-        sessions.delete(sessionKey)
+        sessions.delete(sKey)
+        sessionMemoryKeys.delete(sKey)
         session = null
       }
 
@@ -199,7 +215,7 @@ async function handleRequest(
 
       // Inject persistent memory for new sessions (first query in this directory)
       if (!shouldContinue) {
-        const memoryBlock = formatMemoryForPrompt(sessionKey)
+        const memoryBlock = formatMemoryForPrompt(memKey)
         if (memoryBlock) {
           contextBlock += `\n\n${memoryBlock}`
         }
@@ -218,7 +234,7 @@ async function handleRequest(
         prompt = `${payload.pipeInput}\n\n---\n\n${prompt}`
       }
 
-      log("info", `Routing to '${agentName}' [${sessionKey}]${shouldContinue ? " (continuing)" : ""}: ${prompt.slice(0, 100)}...`)
+      log("info", `Routing to '${agentName}' [${memKey.projectName}:${memKey.branchName}]${shouldContinue ? " (continuing)" : ""}: ${prompt.slice(0, 100)}...`)
 
       const result = await routeToAgent(
         prompt,
@@ -235,12 +251,13 @@ async function handleRequest(
         session.queryCount++
         session.lastResponse = result.fullResponse
       } else {
-        sessions.set(sessionKey, {
+        sessions.set(sKey, {
           agentName,
           queryCount: 1,
           lastResponse: result.fullResponse,
           startedAt: Date.now(),
         })
+        sessionMemoryKeys.set(sKey, memKey)
       }
 
       break
@@ -377,6 +394,71 @@ Reply in 1-3 short plain text lines. No markdown, no code fences.`
       break
     }
 
+    case "memory-store": {
+      const payload = request.payload as MemoryStorePayload
+      const memKey = resolveMemoryKey(payload.cwd)
+      const importance = payload.importance ?? "medium"
+
+      const event = {
+        id: globalThis.crypto.randomUUID(),
+        type: payload.eventType,
+        timestamp: Date.now(),
+        content: payload.content.slice(0, 500),
+        importance,
+        metadata: payload.metadata,
+      } as const
+
+      // High-importance events go to both project and task; others just to task
+      if (importance === "high") {
+        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
+      }
+      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
+
+      // Regenerate context file after memory write (debounced)
+      const memStoreGitRoot = resolveGitRoot(payload.cwd)
+      if (memStoreGitRoot) {
+        contextFileGen.scheduleRegeneration(memStoreGitRoot, context.getContext(), memKey)
+      }
+
+      // Trigger compaction asynchronously (non-blocking)
+      setTimeout(() => {
+        compactTaskIfNeeded(memKey.projectKey, memKey.taskKey).catch(() => {})
+        if (importance === "high") {
+          compactProjectIfNeeded(memKey.projectKey).catch(() => {})
+        }
+      }, 0)
+
+      log("info", `Memory stored (${payload.eventType}/${importance}) for ${memKey.projectName}:${memKey.branchName}`)
+      sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
+    case "memory-read": {
+      const payload = request.payload as MemoryReadPayload
+      const memKey = resolveMemoryKey(payload.cwd)
+      const formatted = formatMemoryForPrompt(memKey)
+      sendResponse(socket, { type: "status", data: formatted ?? "" })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
+    case "context-read": {
+      const payload = request.payload as ContextReadPayload
+      const cwd = payload.cwd ?? context.getContext().cwd
+      const memKey = resolveMemoryKey(cwd)
+      const ctx = context.getContext()
+      sendResponse(socket, {
+        type: "status",
+        data: JSON.stringify({
+          context: ctx,
+          formattedContext: context.formatForPrompt(),
+          memory: formatMemoryForPrompt(memKey),
+        }),
+      })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
     case "shutdown":
       log("info", "Shutdown requested")
       sendResponse(socket, { type: "done", data: "shutting down" })
@@ -391,6 +473,9 @@ async function startDaemon(): Promise<void> {
   // Detect available agents on startup
   availableAgents = await detectAvailableAgents()
   log("info", `Available agents: ${availableAgents.join(", ") || "none detected"}`)
+
+  // Migrate legacy memory files to two-level format
+  migrateIfNeeded()
 
   // Clean up stale memory files
   cleanupStaleMemory()
@@ -446,8 +531,11 @@ async function startDaemon(): Promise<void> {
   const shutdown = (): void => {
     log("info", "Shutting down...")
     // Persist all active sessions to memory before exit
-    for (const [key, session] of sessions) {
-      persistSessionMemory(key, session)
+    for (const [sKey, session] of sessions) {
+      const memKey = sessionMemoryKeys.get(sKey)
+      if (memKey) {
+        persistSessionMemory(memKey, session)
+      }
     }
     server.close()
     try {
