@@ -23,7 +23,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, addTaskEvent, addProjectEvent, cleanupStaleMemory, findMostRecentMemory } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm } from "../assist/fast-llm.js"
@@ -248,11 +248,42 @@ async function handleRequest(
       const agentConfig = builtinAgents[agentName]
       let contextBlock = context.formatForPrompt()
 
-      // Inject persistent memory for new sessions (first query in this directory)
+      // Inject persistent memory — try current project, fall back to recent activity
       if (!shouldContinue) {
-        const memoryBlock = formatMemoryForPrompt(memKey)
+        let memoryBlock = formatMemoryForPrompt(memKey)
+
+        // If no memory for current dir, check recent command cwds
+        if (!memoryBlock) {
+          const shellCtx = context.getContext()
+          const recentCwds = shellCtx.recentCommands.map((c: { cwd: string }) => c.cwd).filter(Boolean)
+          const seen = new Set<string>()
+          for (let i = recentCwds.length - 1; i >= 0; i--) {
+            const cwd = recentCwds[i]!
+            if (seen.has(cwd)) continue
+            seen.add(cwd)
+            const recentKey = resolveMemoryKey(cwd)
+            if (recentKey.projectKey !== memKey.projectKey) {
+              memoryBlock = formatMemoryForPrompt(recentKey)
+              if (memoryBlock) break
+            }
+          }
+        }
+
+        // Last resort: find the most recently active project on disk
+        if (!memoryBlock) {
+          const recent = findMostRecentMemory()
+          if (recent) {
+            const task = recent.memory.events.slice(-10)
+            const lines = [`[Project: ${recent.memory.projectName}]`]
+            for (const e of task) {
+              lines.push(`- ${e.content} (${e.type})`)
+            }
+            memoryBlock = lines.join("\n")
+          }
+        }
+
         if (memoryBlock) {
-          contextBlock += `\n\n${memoryBlock}`
+          contextBlock += `\n\n[Ambient Memory — persistent context across sessions]\n${memoryBlock}`
         }
       }
 

@@ -121,7 +121,7 @@ function buildEnrichedPrompt(
     return userPrompt
   }
 
-  return `[Shell Context]
+  return `[Ambient Shell Context — you have access to persistent memory and terminal state]
 ${contextBlock}
 
 [Task]

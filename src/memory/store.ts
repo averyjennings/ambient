@@ -243,6 +243,30 @@ export function listTaskKeys(projectKey: string): string[] {
   }
 }
 
+/**
+ * Find the most recently active project memory across all stored projects.
+ * Used as a fallback when the current cwd has no memory (e.g. parent directory).
+ */
+export function findMostRecentMemory(): { projectKey: string; memory: ProjectMemory } | null {
+  const projectsDir = join(getMemoryBaseDir(), "projects")
+  if (!existsSync(projectsDir)) return null
+
+  let best: { projectKey: string; memory: ProjectMemory } | null = null
+
+  try {
+    for (const dir of readdirSync(projectsDir)) {
+      const memory = loadProjectMemory(dir)
+      if (memory && (!best || memory.lastActive > best.memory.lastActive)) {
+        best = { projectKey: dir, memory }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return best
+}
+
 // --- Cleanup ---
 
 /**
