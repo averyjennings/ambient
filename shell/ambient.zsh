@@ -225,6 +225,20 @@ r() {
   ${=AMBIENT_BIN} "$@"
 }
 
+# --- Reload: build + restart daemon + re-source shell in one shot ---
+_AMBIENT_ROOT="${0:A:h}/.."
+_AMBIENT_SHELL="${0:A}"
+
+reload() {
+  echo "Building..."
+  (cd "$_AMBIENT_ROOT" && pnpm build) || { echo "Build failed."; return 1; }
+  ${=AMBIENT_BIN} daemon stop 2>/dev/null
+  echo "Re-sourcing shell integration..."
+  source "$_AMBIENT_SHELL"
+  ${=AMBIENT_BIN} daemon start 2>/dev/null
+  echo "Done."
+}
+
 # --- Send initial context on shell startup ---
 _ambient_refresh_git
 _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"chpwd\",\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
