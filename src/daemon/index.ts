@@ -16,14 +16,17 @@ import type {
   DaemonRequest,
   DaemonResponse,
   MemoryKey,
+  MemoryDeletePayload,
   MemoryReadPayload,
+  MemorySearchPayload,
   MemoryStorePayload,
+  MemoryUpdatePayload,
   NewSessionPayload,
   QueryPayload,
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory, deleteMemoryEvent, updateMemoryEvent } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm, callFastLlm } from "../assist/fast-llm.js"
@@ -31,6 +34,7 @@ import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
 import { ensureAmbientInstructions } from "../setup/claude-md.js"
+import { ensureClaudeHooks } from "../setup/claude-hooks.js"
 
 const context = new ContextEngine()
 const contextFileGen = new ContextFileGenerator()
@@ -773,6 +777,67 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
       break
     }
 
+    case "memory-delete": {
+      const payload = request.payload as MemoryDeletePayload
+      if (!payload.cwd || !payload.eventId) {
+        sendResponse(socket, { type: "error", data: "memory-delete requires cwd and eventId" })
+        break
+      }
+      const memKey = resolveMemoryKey(payload.cwd)
+      const deleted = deleteMemoryEvent(memKey, payload.eventId)
+      if (deleted) {
+        log("info", `Memory deleted: ${payload.eventId}`)
+        const deleteGitRoot = resolveGitRoot(payload.cwd)
+        if (deleteGitRoot) {
+          contextFileGen.scheduleRegeneration(deleteGitRoot, context.getContext(), memKey)
+        }
+      }
+      // Idempotent: return success whether event existed or not
+      sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
+    case "memory-update": {
+      const payload = request.payload as MemoryUpdatePayload
+      if (!payload.cwd || !payload.eventId || !payload.newContent) {
+        sendResponse(socket, { type: "error", data: "memory-update requires cwd, eventId, and newContent" })
+        break
+      }
+      const memKey = resolveMemoryKey(payload.cwd)
+      const updated = updateMemoryEvent(memKey, payload.eventId, payload.newContent)
+      if (updated) {
+        log("info", `Memory updated: ${payload.eventId}`)
+        const updateGitRoot = resolveGitRoot(payload.cwd)
+        if (updateGitRoot) {
+          contextFileGen.scheduleRegeneration(updateGitRoot, context.getContext(), memKey)
+        }
+        sendResponse(socket, { type: "done", data: "ok" })
+      } else {
+        sendResponse(socket, { type: "error", data: `Event not found: ${payload.eventId}` })
+      }
+      break
+    }
+
+    case "memory-search": {
+      const payload = request.payload as MemorySearchPayload
+      if (!payload.query) {
+        sendResponse(socket, { type: "error", data: "memory-search requires a query" })
+        break
+      }
+      const maxEvents = Math.min(payload.maxEvents ?? 25, 100)
+      const results = searchAllMemory(payload.query, maxEvents)
+      sendResponse(socket, { type: "status", data: results ?? "No matching memories found." })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
+    case "output-read": {
+      const output = context.getLastOutput()
+      sendResponse(socket, { type: "status", data: output ?? "" })
+      sendResponse(socket, { type: "done", data: "" })
+      break
+    }
+
     case "shutdown":
       log("info", "Shutdown requested")
       sendResponse(socket, { type: "done", data: "shutting down" })
@@ -789,9 +854,17 @@ async function startDaemon(): Promise<void> {
   log("info", `Available agents: ${availableAgents.join(", ") || "none detected"}`)
 
   // Ensure global CLAUDE.md has ambient memory instructions
-  const added = ensureAmbientInstructions()
-  if (added) {
+  const mdResult = ensureAmbientInstructions()
+  if (mdResult === "added") {
     log("info", "Added ambient memory instructions to global CLAUDE.md")
+  } else if (mdResult === "updated") {
+    log("info", "Updated ambient memory instructions in global CLAUDE.md")
+  }
+
+  // Ensure Claude Code hooks are registered for ambient reminders
+  const hookResult = ensureClaudeHooks()
+  if (hookResult.added.length > 0) {
+    log("info", `Registered Claude Code hooks: ${hookResult.added.join(", ")}`)
   }
 
   // Migrate legacy memory files to two-level format

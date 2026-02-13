@@ -378,6 +378,73 @@ export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents =
 // --- Cross-project search ---
 
 /**
+ * Delete a memory event by ID from both project and task stores.
+ * Returns true if the event was found and removed.
+ */
+export function deleteMemoryEvent(memKey: MemoryKey, eventId: string): boolean {
+  let found = false
+
+  const project = loadProjectMemory(memKey.projectKey)
+  if (project) {
+    const before = project.events.length
+    project.events = project.events.filter((e) => e.id !== eventId)
+    if (project.events.length < before) {
+      found = true
+      saveProjectMemory(project)
+    }
+  }
+
+  const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+  if (task) {
+    const before = task.events.length
+    task.events = task.events.filter((e) => e.id !== eventId)
+    if (task.events.length < before) {
+      found = true
+      saveTaskMemory(task)
+    }
+  }
+
+  return found
+}
+
+/**
+ * Update a memory event's content by ID. Searches both project and task stores.
+ * Returns true if the event was found and updated.
+ */
+export function updateMemoryEvent(memKey: MemoryKey, eventId: string, newContent: string): boolean {
+  let found = false
+  const truncated = newContent.slice(0, 500)
+
+  const project = loadProjectMemory(memKey.projectKey)
+  if (project) {
+    const idx = project.events.findIndex((e) => e.id === eventId)
+    if (idx !== -1) {
+      found = true
+      project.events = project.events.map((e) =>
+        e.id === eventId ? { ...e, content: truncated } : e,
+      )
+      project.lastActive = Date.now()
+      saveProjectMemory(project)
+    }
+  }
+
+  const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+  if (task) {
+    const idx = task.events.findIndex((e) => e.id === eventId)
+    if (idx !== -1) {
+      found = true
+      task.events = task.events.map((e) =>
+        e.id === eventId ? { ...e, content: truncated } : e,
+      )
+      task.lastActive = Date.now()
+      saveTaskMemory(task)
+    }
+  }
+
+  return found
+}
+
+/**
  * List all project keys in the memory directory.
  */
 export function listAllProjects(): string[] {

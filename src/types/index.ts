@@ -92,8 +92,8 @@ export interface AssistPayload {
 }
 
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist" | "memory-store" | "memory-read" | "context-read"
-  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | MemoryStorePayload | MemoryReadPayload | ContextReadPayload | Record<string, never>
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist" | "memory-store" | "memory-read" | "memory-delete" | "memory-update" | "memory-search" | "output-read" | "context-read"
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | MemoryStorePayload | MemoryReadPayload | MemoryDeletePayload | MemoryUpdatePayload | MemorySearchPayload | ContextReadPayload | Record<string, never>
 }
 
 export interface QueryPayload {
@@ -203,6 +203,23 @@ export interface MemoryStorePayload {
 export interface MemoryReadPayload {
   readonly cwd: string
   readonly scope?: "project" | "task" | "both"
+}
+
+export interface MemoryDeletePayload {
+  readonly cwd: string
+  readonly eventId: string
+}
+
+export interface MemoryUpdatePayload {
+  readonly cwd: string
+  readonly eventId: string
+  readonly newContent: string
+}
+
+export interface MemorySearchPayload {
+  readonly query: string
+  readonly cwd?: string
+  readonly maxEvents?: number
 }
 
 export interface ContextReadPayload {

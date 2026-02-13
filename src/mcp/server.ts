@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import { sendDaemonRequest } from "./daemon-client.js"
 import { resolveMemoryKey } from "../memory/resolve.js"
-import { formatMemoryForPrompt, loadProjectMemory, loadTaskMemory, addTaskEvent, addProjectEvent } from "../memory/store.js"
+import { formatMemoryForPrompt, loadProjectMemory, loadTaskMemory, addTaskEvent, addProjectEvent, deleteMemoryEvent, updateMemoryEvent, searchAllMemory } from "../memory/store.js"
 import type { ShellContext, MemoryEvent } from "../types/index.js"
 
 interface McpServerOptions {
@@ -346,6 +346,153 @@ export function createAmbientMcpServer(options: McpServerOptions): McpServer {
       const content = `Error: ${error}\nResolution: ${resolution}`
       const metadata = file ? { file } : undefined
       const text = await writeMemoryEvent(cwd, "error-resolution", content, "medium", metadata)
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  // --- New read tools ---
+
+  server.tool(
+    "get_recent_output",
+    "Get the most recently captured command output (from `rc` wrapper or `r capture`). Useful for diagnosing errors when the user ran a build/test command.",
+    {},
+    async () => {
+      const result = await sendDaemonRequest({
+        type: "output-read",
+        payload: {},
+      })
+
+      const text = (result.ok && result.data)
+        ? result.data
+        : "No captured output available (use `rc <command>` to capture output, or daemon may not be running)"
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "search_all_memory",
+    "Search across ALL projects and branches for relevant memories using TF-IDF + recency scoring. Use this to recall decisions or context from other projects.",
+    {
+      query: z.string().describe("Search query — keywords about what you're looking for"),
+      maxResults: z.number().optional().describe("Maximum results to return (default: 25)"),
+    },
+    async ({ query, maxResults }) => {
+      // Try daemon first for freshest data
+      const result = await sendDaemonRequest({
+        type: "memory-search",
+        payload: { query, maxEvents: maxResults },
+      }, 5_000) // longer timeout for cross-project search
+
+      if (result.ok && result.data) {
+        return { content: [{ type: "text" as const, text: result.data }] }
+      }
+
+      // Fallback: search directly from disk
+      const text = searchAllMemory(query, maxResults ?? 25) ?? "No matching memories found."
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  // --- Memory management tools ---
+
+  server.tool(
+    "update_memory",
+    "Update the content of an existing memory event by its ID. Use to correct wrong decisions or update outdated information.",
+    {
+      eventId: z.string().describe("The ID of the memory event to update"),
+      newContent: z.string().max(500).describe("The updated content to replace the existing content (max 500 chars)"),
+    },
+    async ({ eventId, newContent }) => {
+      // Try daemon first (handles context file regeneration)
+      const result = await sendDaemonRequest({
+        type: "memory-update",
+        payload: { cwd, eventId, newContent },
+      })
+
+      if (result.ok) {
+        return { content: [{ type: "text" as const, text: "Memory updated successfully." }] }
+      }
+
+      // Fallback: update directly on disk when daemon is down
+      const memKey = resolveMemoryKey(cwd)
+      const updated = updateMemoryEvent(memKey, eventId, newContent)
+      const text = updated
+        ? "Memory updated (direct to disk — daemon not running)."
+        : `Memory event not found: ${eventId}`
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "delete_memory",
+    "Delete a memory event by its ID. Use to remove obsolete or incorrect memories.",
+    {
+      eventId: z.string().describe("The ID of the memory event to delete"),
+    },
+    async ({ eventId }) => {
+      // Try daemon first (it handles context file regeneration)
+      const result = await sendDaemonRequest({
+        type: "memory-delete",
+        payload: { cwd, eventId },
+      })
+
+      if (result.ok) {
+        // Daemon handled it (may have been a no-op if event didn't exist — that's fine, idempotent)
+        return { content: [{ type: "text" as const, text: "Memory deleted." }] }
+      }
+
+      // Daemon is down — fallback to direct disk delete
+      const memKey = resolveMemoryKey(cwd)
+      const deleted = deleteMemoryEvent(memKey, eventId)
+      const text = deleted
+        ? "Memory deleted (direct to disk — daemon not running)."
+        : `Memory event not found: ${eventId}`
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "list_memory_events",
+    "List all memory events for the current project/branch with their IDs. Use this to discover event IDs before calling update_memory or delete_memory.",
+    {
+      scope: z.enum(["project", "task", "both"]).optional().describe("Which events to list (default: both)"),
+      type: z.enum(["decision", "error-resolution", "task-update", "file-context", "session-summary"]).optional().describe("Filter by event type"),
+    },
+    async ({ scope, type }) => {
+      const memKey = resolveMemoryKey(cwd)
+      const effectiveScope = scope ?? "both"
+      const lines: string[] = []
+
+      if (effectiveScope === "project" || effectiveScope === "both") {
+        const project = loadProjectMemory(memKey.projectKey)
+        if (project) {
+          const events = type ? project.events.filter((e) => e.type === type) : project.events
+          if (events.length > 0) {
+            lines.push(`[Project: ${memKey.projectName}] (${events.length} events)`)
+            for (const e of events) {
+              const date = new Date(e.timestamp).toISOString().slice(0, 10)
+              lines.push(`  id=${e.id}  [${e.type}] [${e.importance}] ${date}  ${e.content.slice(0, 120)}`)
+            }
+          }
+        }
+      }
+
+      if (effectiveScope === "task" || effectiveScope === "both") {
+        const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+        if (task) {
+          const events = type ? task.events.filter((e) => e.type === type) : task.events
+          if (events.length > 0) {
+            if (lines.length > 0) lines.push("")
+            lines.push(`[Task: ${memKey.branchName}] (${events.length} events)`)
+            for (const e of events) {
+              const date = new Date(e.timestamp).toISOString().slice(0, 10)
+              lines.push(`  id=${e.id}  [${e.type}] [${e.importance}] ${date}  ${e.content.slice(0, 120)}`)
+            }
+          }
+        }
+      }
+
+      const text = lines.length > 0 ? lines.join("\n") : "No memory events found."
       return { content: [{ type: "text" as const, text }] }
     },
   )
