@@ -104,6 +104,14 @@ export function addProjectEvent(projectKey: string, projectName: string, origin:
     }
   }
 
+  // Supersede detection: if a new decision overlaps with an existing one, replace it
+  if (event.type === "decision") {
+    const supersededId = findSupersededDecision(memory.events, event.content)
+    if (supersededId) {
+      memory.events = memory.events.filter((e) => e.id !== supersededId)
+    }
+  }
+
   memory.events.push(event)
   memory.lastActive = Date.now()
 
@@ -157,6 +165,14 @@ export function addTaskEvent(
       lastActive: Date.now(),
       archived: false,
       events: [],
+    }
+  }
+
+  // Supersede detection: if a new decision overlaps with an existing one, replace it
+  if (event.type === "decision") {
+    const supersededId = findSupersededDecision(memory.events, event.content)
+    if (supersededId) {
+      memory.events = memory.events.filter((e) => e.id !== supersededId)
     }
   }
 
@@ -230,14 +246,60 @@ const STOP_WORDS = new Set([
 ])
 
 /**
- * Extract meaningful keywords from user input for memory search.
+ * Extract meaningful keywords from text for search and similarity.
  */
-function extractKeywords(input: string): string[] {
+export function extractKeywords(input: string): string[] {
   return input
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
     .filter(w => w.length > 2 && !STOP_WORDS.has(w))
+}
+
+// --- Decision dedup (supersede detection) ---
+
+/**
+ * Jaccard similarity between two keyword sets: |intersection| / |union|.
+ * Returns 0 if either set is empty.
+ */
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  let intersection = 0
+  for (const word of a) {
+    if (b.has(word)) intersection++
+  }
+  const union = a.size + b.size - intersection
+  return union === 0 ? 0 : intersection / union
+}
+
+const SUPERSEDE_THRESHOLD = 0.4
+
+/**
+ * Find an existing decision event that the new decision supersedes.
+ * Uses Jaccard keyword similarity — if an existing decision shares >40% of
+ * keywords with the new one, it's considered superseded (same topic, evolved conclusion).
+ *
+ * Returns the event ID of the most similar superseded decision, or null.
+ * Only compares against "decision" type events.
+ */
+export function findSupersededDecision(events: readonly MemoryEvent[], newContent: string): string | null {
+  const newKeywords = new Set(extractKeywords(newContent))
+  if (newKeywords.size < 2) return null // too few keywords to compare reliably
+
+  let bestId: string | null = null
+  let bestScore = 0
+
+  for (const event of events) {
+    if (event.type !== "decision") continue
+    const existingKeywords = new Set(extractKeywords(event.content))
+    const similarity = jaccardSimilarity(newKeywords, existingKeywords)
+    if (similarity > SUPERSEDE_THRESHOLD && similarity > bestScore) {
+      bestScore = similarity
+      bestId = event.id
+    }
+  }
+
+  return bestId
 }
 
 // --- TF-IDF scoring ---

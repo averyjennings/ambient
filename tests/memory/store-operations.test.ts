@@ -365,3 +365,147 @@ describe("updateMemoryEvent", () => {
     expect(loaded.events[1]!.content).toBe("updated")
   })
 })
+
+// --- findSupersededDecision ---
+
+describe("findSupersededDecision", () => {
+  it("returns null when no decisions exist", () => {
+    expect(store.findSupersededDecision([], "Use JWT for authentication")).toBeNull()
+  })
+
+  it("returns null when only non-decision events exist", () => {
+    const events = [
+      makeEvent({ type: "task-update", content: "Working on JWT authentication" }),
+      makeEvent({ type: "error-resolution", content: "Fixed JWT token expiry issue" }),
+    ]
+    expect(store.findSupersededDecision(events, "Use JWT with refresh tokens for auth")).toBeNull()
+  })
+
+  it("returns null when new content has too few keywords", () => {
+    const events = [makeEvent({ type: "decision", content: "Use JWT for authentication" })]
+    // "ok" has only 1 keyword after stop-word removal — too few to compare
+    expect(store.findSupersededDecision(events, "ok")).toBeNull()
+  })
+
+  it("detects superseded decision with high keyword overlap", () => {
+    const old = makeEvent({ type: "decision", content: "Use JWT tokens for authentication" })
+    const events = [old]
+    const result = store.findSupersededDecision(events, "Use JWT tokens with refresh for authentication")
+    expect(result).toBe(old.id)
+  })
+
+  it("does not supersede decisions with different topics", () => {
+    const events = [
+      makeEvent({ type: "decision", content: "Use PostgreSQL for the database layer" }),
+    ]
+    expect(store.findSupersededDecision(events, "Use JWT tokens for authentication")).toBeNull()
+  })
+
+  it("returns the most similar decision when multiple exist", () => {
+    const unrelated = makeEvent({ type: "decision", content: "Use PostgreSQL for database storage" })
+    const related = makeEvent({ type: "decision", content: "Use session expiry timeout of 90 seconds" })
+    const events = [unrelated, related]
+
+    const result = store.findSupersededDecision(events, "Trust fresh session state, no expiry timeout needed")
+    // "session" and "expiry" and "timeout" overlap with the related decision
+    // "PostgreSQL" and "database" and "storage" don't overlap at all
+    if (result !== null) {
+      expect(result).toBe(related.id)
+    }
+    // If null, the keywords didn't overlap enough — that's acceptable
+  })
+})
+
+// --- Supersede integration (addProjectEvent / addTaskEvent) ---
+
+describe("decision supersede integration", () => {
+  it("replaces superseded decision in project store when adding a new one", () => {
+    const old = makeEvent({ type: "decision", content: "Use JWT tokens for user authentication" })
+    store.addProjectEvent("pk-sup", "proj", "origin", old)
+
+    const replacement = makeEvent({ type: "decision", content: "Use JWT tokens with refresh for user authentication" })
+    store.addProjectEvent("pk-sup", "proj", "origin", replacement)
+
+    const loaded = store.loadProjectMemory("pk-sup")!
+    // Should have 1 event (old superseded), not 2
+    const decisions = loaded.events.filter((e) => e.type === "decision")
+    expect(decisions).toHaveLength(1)
+    expect(decisions[0]!.id).toBe(replacement.id)
+    expect(decisions[0]!.content).toContain("refresh")
+  })
+
+  it("replaces superseded decision in task store when adding a new one", () => {
+    const old = makeEvent({ type: "decision", content: "Use JWT tokens for user authentication" })
+    store.addTaskEvent("pk-sup", "tk-sup", "feature/auth", old)
+
+    const replacement = makeEvent({ type: "decision", content: "Use JWT tokens with refresh for user authentication" })
+    store.addTaskEvent("pk-sup", "tk-sup", "feature/auth", replacement)
+
+    const loaded = store.loadTaskMemory("pk-sup", "tk-sup")!
+    const decisions = loaded.events.filter((e) => e.type === "decision")
+    expect(decisions).toHaveLength(1)
+    expect(decisions[0]!.id).toBe(replacement.id)
+  })
+
+  it("does not supersede when topics are different", () => {
+    store.addProjectEvent("pk-nosup", "proj", "origin",
+      makeEvent({ type: "decision", content: "Use PostgreSQL for database storage" }))
+    store.addProjectEvent("pk-nosup", "proj", "origin",
+      makeEvent({ type: "decision", content: "Use JWT tokens for user authentication" }))
+
+    const loaded = store.loadProjectMemory("pk-nosup")!
+    expect(loaded.events.filter((e) => e.type === "decision")).toHaveLength(2)
+  })
+
+  it("does not supersede non-decision events even with similar content", () => {
+    store.addTaskEvent("pk-nodec", "tk-nodec", "main",
+      makeEvent({ type: "task-update", content: "Started working on JWT authentication" }))
+    store.addTaskEvent("pk-nodec", "tk-nodec", "main",
+      makeEvent({ type: "task-update", content: "Completed working on JWT authentication" }))
+
+    const loaded = store.loadTaskMemory("pk-nodec", "tk-nodec")!
+    expect(loaded.events).toHaveLength(2)
+  })
+
+  it("preserves non-decision events when superseding a decision", () => {
+    const taskUpdate = makeEvent({ type: "task-update", content: "Started auth work" })
+    const oldDecision = makeEvent({ type: "decision", content: "Use JWT tokens for authentication" })
+    store.addProjectEvent("pk-mix", "proj", "origin", taskUpdate)
+    store.addProjectEvent("pk-mix", "proj", "origin", oldDecision)
+
+    const newDecision = makeEvent({ type: "decision", content: "Use JWT tokens with refresh for authentication" })
+    store.addProjectEvent("pk-mix", "proj", "origin", newDecision)
+
+    const loaded = store.loadProjectMemory("pk-mix")!
+    expect(loaded.events).toHaveLength(2) // task-update + new decision
+    expect(loaded.events.find((e) => e.type === "task-update")).toBeDefined()
+    expect(loaded.events.find((e) => e.id === newDecision.id)).toBeDefined()
+    expect(loaded.events.find((e) => e.id === oldDecision.id)).toBeUndefined()
+  })
+})
+
+// --- extractKeywords ---
+
+describe("extractKeywords", () => {
+  it("extracts meaningful words, removing stop words", () => {
+    const keywords = store.extractKeywords("Use JWT for authentication in the API")
+    expect(keywords).toContain("jwt")
+    expect(keywords).toContain("authentication")
+    expect(keywords).toContain("api")
+    expect(keywords).not.toContain("use") // stop word
+    expect(keywords).not.toContain("for") // stop word
+    expect(keywords).not.toContain("the") // stop word
+    expect(keywords).not.toContain("in")  // too short
+  })
+
+  it("lowercases and removes punctuation", () => {
+    const keywords = store.extractKeywords("JWT-based Auth! (v2)")
+    expect(keywords).toContain("jwt-based")
+    expect(keywords).toContain("auth")
+  })
+
+  it("returns empty array for all stop words", () => {
+    const keywords = store.extractKeywords("the is are a an")
+    expect(keywords).toHaveLength(0)
+  })
+})

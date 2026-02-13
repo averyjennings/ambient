@@ -50,12 +50,15 @@ Added 4-second perl alarm wrapper to prevent shell freeze if daemon hangs. Match
 ### Whitelist-based auto-capture
 `accept-line` widget auto-wraps known-safe commands (build tools, test runners, linters) in `rc` for automatic output capture. Uses a whitelist (not blacklist) to avoid breaking TUI apps.
 
+### Decision supersede detection
+When storing a new decision, Jaccard keyword similarity is computed against existing decisions. If >40% keyword overlap, the old decision is replaced instead of appended. Prevents repetitive, overlapping decisions that waste context window.
+
 ---
 
 ## Planned
 
-### Semantic deduplication
-Current dedup only checks last event's first 80 chars. Need embedding-based or fuzzy matching to detect paraphrased duplicates across sessions.
+### Deeper semantic deduplication
+Decision supersede detection (Jaccard) handles same-topic evolved decisions. Still needed: embedding-based matching for paraphrased duplicates with different wording, and dedup across event types (e.g., a decision that restates an error resolution).
 
 ### Memory importance auto-escalation
 Frequently-referenced events should gain importance over time. Currently importance is static (set on write, never changes).
