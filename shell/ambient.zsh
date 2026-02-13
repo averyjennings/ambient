@@ -168,13 +168,18 @@ _ambient_accept_line() {
   fi
 
   # 3. Starts with a conversational word (2+ words only)
+  #    BUT only if the first word is NOT a known command/alias/function/builtin.
+  #    This prevents stealing input from e.g. `show` (alias), `help` (builtin),
+  #    `who` (command), or any user-defined function that overlaps with the list.
   if (( is_natural == 0 )) && [[ "$buf" == *" "* ]]; then
-    local lower_first="${first_word:l}"
-    case "$lower_first" in
-      what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
-        is_natural=1
-        ;;
-    esac
+    if ! whence "$first_word" &>/dev/null; then
+      local lower_first="${first_word:l}"
+      case "$lower_first" in
+        what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
+          is_natural=1
+          ;;
+      esac
+    fi
   fi
 
   # If it looks like natural language, route to ambient
