@@ -168,11 +168,14 @@ _ambient_accept_line() {
   fi
 
   # 3. Starts with a conversational word (2+ words only)
-  #    BUT only if the first word is NOT a known command/alias/function/builtin.
-  #    This prevents stealing input from e.g. `show` (alias), `help` (builtin),
-  #    `who` (command), or any user-defined function that overlaps with the list.
+  #    BUT only if the first word is NOT a user-defined alias or function.
+  #    System commands that share names with conversational words (what, who, help)
+  #    are rare enough that NL intent should take priority. But if the user created
+  #    an alias like `show` or a function like `please`, they clearly intend to use it.
   if (( is_natural == 0 )) && [[ "$buf" == *" "* ]]; then
-    if ! whence "$first_word" &>/dev/null; then
+    local word_type
+    word_type=$(whence -w "$first_word" 2>/dev/null)
+    if [[ "$word_type" != *": alias" && "$word_type" != *": function" ]]; then
       local lower_first="${first_word:l}"
       case "$lower_first" in
         what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
