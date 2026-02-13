@@ -280,7 +280,8 @@ rc() {
   "$@" 2>&1 | tee "$capture_file"
   local exit_code=${pipestatus[1]}
   # Always capture output (not just on failure) so ambient can answer questions about it
-  ${=AMBIENT_BIN} capture < "$capture_file" &>/dev/null &
+  # Subshell suppresses zsh job control notifications ([1] 12345 / [1] + done)
+  (${=AMBIENT_BIN} capture < "$capture_file" &>/dev/null &)
   rm -f "$capture_file"
   return $exit_code
 }
