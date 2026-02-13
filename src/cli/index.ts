@@ -141,6 +141,26 @@ async function main(): Promise<void> {
     return
   }
 
+  // Set up Claude Code integration (CLAUDE.md instructions + hooks)
+  // This runs automatically on daemon startup, but can be triggered manually.
+  if (args[0] === "setup") {
+    const { ensureAmbientInstructions } = await import("../setup/claude-md.js")
+    const { ensureClaudeHooks } = await import("../setup/claude-hooks.js")
+
+    const mdResult = ensureAmbientInstructions()
+    const hookResult = ensureClaudeHooks()
+
+    console.log(`CLAUDE.md instructions: ${mdResult}`)
+    if (hookResult.added.length > 0) {
+      console.log(`Claude Code hooks added: ${hookResult.added.join(", ")}`)
+    }
+    if (hookResult.skipped.length > 0) {
+      console.log(`Claude Code hooks already present: ${hookResult.skipped.join(", ")}`)
+    }
+    console.log("Setup complete.")
+    return
+  }
+
   if (args[0] === "daemon") {
     if (args[1] === "stop") {
       await sendRequest({ type: "shutdown", payload: {} })
@@ -543,6 +563,9 @@ function printUsage(): void {
   r daemon start                     Start the background daemon
   r daemon stop                      Stop the daemon
   r daemon status                    Show daemon status + session info
+
+\x1b[1mSetup:\x1b[0m
+  r setup                            Set up Claude Code integration (CLAUDE.md + hooks)
 
 \x1b[1mMCP:\x1b[0m
   r mcp-serve                        Run as MCP server (for agent configs)

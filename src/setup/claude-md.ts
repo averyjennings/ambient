@@ -2,36 +2,47 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs
 import { join } from "node:path"
 import { homedir } from "node:os"
 
-const AMBIENT_MARKER = "<!-- ambient:memory-instructions -->"
+const AMBIENT_MARKER_START = "<!-- ambient:memory-instructions -->"
+const AMBIENT_MARKER_END = "<!-- /ambient:memory-instructions -->"
+
+// Version bump this when the section content changes so existing installs get updated.
+const AMBIENT_SECTION_VERSION = "2"
+const AMBIENT_VERSION_MARKER = `<!-- ambient:version:${AMBIENT_SECTION_VERSION} -->`
 
 const AMBIENT_SECTION = `
-${AMBIENT_MARKER}
-## Ambient Memory
+${AMBIENT_MARKER_START}
+${AMBIENT_VERSION_MARKER}
+## Ambient Memory (REQUIRED)
 
-Ambient is your persistent memory layer. It remembers decisions, tasks, and error resolutions across sessions, scoped to the current project and git branch.
+Ambient is your persistent memory across sessions, scoped to project and git branch.
 
-### Reading context
-- At the start of a session, call \`get_task_context\` (ambient MCP) to see what you remember about this project and branch.
-- Use \`get_shell_context\` to see the user's current terminal state (cwd, git branch, recent commands).
-- Use \`get_decisions\` to recall past architectural decisions.
+### Session start — call ALL THREE before any work:
+1. \`get_task_context\`
+2. \`get_shell_context\`
+3. \`get_decisions\`
 
-### Writing memories (do this proactively)
+### Write triggers — call IMMEDIATELY when these happen, in the SAME response as the action:
 
-**If ambient MCP tools are available** (look for \`store_decision\`, \`store_task_update\`, \`store_error_resolution\`):
-- **\`store_decision\`**: Record important decisions (architecture, library choice, design pattern). Include brief reasoning.
-- **\`store_task_update\`**: Record task starts and completions.
-- **\`store_error_resolution\`**: Record errors and how they were fixed.
+| Trigger | Tool |
+|---|---|
+| You choose between two approaches | \`store_decision\` (include reasoning) |
+| You reject or revert a previous approach | \`store_decision\` (supersedes old one) |
+| You discover something surprising about the codebase | \`store_decision\` |
+| You diagnose and fix a non-obvious bug | \`store_error_resolution\` |
+| You start a significant chunk of work | \`store_task_update\` (status: started) |
+| You finish a significant chunk of work | \`store_task_update\` (status: completed) |
 
 **If MCP tools are NOT available**, use the shell command instead:
-- \`ambient remember "Chose JWT with refresh tokens for auth"\` — stores as a decision
-- \`ambient remember --type task-update "Implementing rate limiting"\` — stores as task update
-- \`ambient remember --type error-resolution "Fixed CORS by adding allowed origins"\` — stores error fix
+- \`ambient remember "Chose JWT with refresh tokens for auth"\`
+- \`ambient remember --type task-update "Implementing rate limiting"\`
+- \`ambient remember --type error-resolution "Fixed CORS by adding allowed origins"\`
 
-### When to write
-- Record decisions as you make them, not at the end of a session.
-- Record task updates when starting work and when completing it.
-- Record error resolutions immediately after fixing an issue.
-- Do NOT record trivial actions (reading files, running ls, etc.).
+### Rules
+- Call the tool in the SAME response as the action. Not later. Not in bulk.
+- Read existing memories before writing to avoid duplicates.
+- Do not record trivial actions (file reads, ls, etc.).
+- When in doubt, store it.
+${AMBIENT_MARKER_END}
 `
 
 /**
@@ -52,27 +63,48 @@ function resolveGlobalClaudeMd(): string {
 
 /**
  * Ensure the global CLAUDE.md has ambient memory instructions.
- * Idempotent — skips if the marker is already present.
- * Returns true if instructions were added, false if already present.
+ * Idempotent — adds if missing, updates if outdated (version mismatch).
+ * Returns "added" | "updated" | "current" | "failed".
  */
-export function ensureAmbientInstructions(): boolean {
+export function ensureAmbientInstructions(): "added" | "updated" | "current" | "failed" {
   const claudeMdPath = resolveGlobalClaudeMd()
 
   try {
     if (existsSync(claudeMdPath)) {
       const content = readFileSync(claudeMdPath, "utf-8")
-      if (content.includes(AMBIENT_MARKER)) {
-        return false // already installed
+
+      if (content.includes(AMBIENT_VERSION_MARKER)) {
+        return "current" // already has the latest version
       }
-      // Append to existing file
+
+      if (content.includes(AMBIENT_MARKER_START)) {
+        // Outdated version — replace the section
+        const startIdx = content.indexOf(AMBIENT_MARKER_START)
+        const endIdx = content.indexOf(AMBIENT_MARKER_END)
+
+        if (endIdx !== -1) {
+          // Has both markers — clean replacement
+          const endOfMarker = endIdx + AMBIENT_MARKER_END.length
+          const before = content.slice(0, startIdx)
+          const after = content.slice(endOfMarker)
+          writeFileSync(claudeMdPath, before + AMBIENT_SECTION.trimStart() + after)
+        } else {
+          // Old format without end marker — replace from start marker to end of file
+          const before = content.slice(0, startIdx)
+          writeFileSync(claudeMdPath, before + AMBIENT_SECTION.trimStart())
+        }
+        return "updated"
+      }
+
+      // No marker at all — append
       appendFileSync(claudeMdPath, AMBIENT_SECTION)
-    } else {
-      // Create new file with just the ambient section
-      writeFileSync(claudeMdPath, AMBIENT_SECTION.trimStart())
+      return "added"
     }
-    return true
+
+    // Create new file
+    writeFileSync(claudeMdPath, AMBIENT_SECTION.trimStart())
+    return "added"
   } catch {
-    // Silently fail — CLAUDE.md integration is best-effort
-    return false
+    return "failed"
   }
 }

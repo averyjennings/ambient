@@ -1,0 +1,137 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { homedir } from "node:os"
+
+const REMIND_SCRIPT_NAME = "ambient-remind.sh"
+
+/**
+ * Content of the periodic reminder script.
+ * Runs on UserPromptSubmit. Emits a reminder every 20 minutes so long-running
+ * sessions and post-/clear sessions don't forget about ambient.
+ */
+const REMIND_SCRIPT = `#!/bin/bash
+# Ambient periodic memory reminder (managed by ambient — do not edit)
+# Runs on Claude Code UserPromptSubmit hook.
+# Emits a reminder every 20 minutes for long sessions and after /clear.
+
+REMIND_FILE="/tmp/claude-ambient-remind"
+NOW=$(date +%s)
+LAST=$(cat "$REMIND_FILE" 2>/dev/null || echo 0)
+ELAPSED=$((NOW - LAST))
+
+# Remind every 20 minutes (1200 seconds)
+if [ "$ELAPSED" -gt 1200 ]; then
+    echo "$NOW" > "$REMIND_FILE"
+    echo "AMBIENT: If context is stale or was cleared, call get_task_context and get_decisions. Store any unmemoried decisions, error resolutions, or task completions NOW."
+fi
+`
+
+const SESSION_START_ECHO = "echo 'AMBIENT: Call get_task_context, get_shell_context, AND get_decisions NOW before doing any work. Store decisions in the SAME response as the action — not later.'"
+
+interface HookEntry {
+  readonly matcher?: string
+  readonly hooks: ReadonlyArray<{
+    readonly type: string
+    readonly command: string
+    readonly async?: boolean
+  }>
+}
+
+interface ClaudeSettings {
+  hooks?: Record<string, HookEntry[]>
+  [key: string]: unknown
+}
+
+/**
+ * Ensure the periodic reminder script exists at ~/.ambient/hooks/ambient-remind.sh.
+ * Creates the directory and script if missing. Overwrites if content differs.
+ */
+function ensureRemindScript(): string {
+  const hooksDir = join(homedir(), ".ambient", "hooks")
+  mkdirSync(hooksDir, { recursive: true })
+
+  const scriptPath = join(hooksDir, REMIND_SCRIPT_NAME)
+
+  if (existsSync(scriptPath)) {
+    const existing = readFileSync(scriptPath, "utf-8")
+    if (existing === REMIND_SCRIPT) {
+      return scriptPath // already current
+    }
+  }
+
+  writeFileSync(scriptPath, REMIND_SCRIPT, { mode: 0o755 })
+  return scriptPath
+}
+
+/**
+ * Check if a hook command already exists in an array of hook entries.
+ */
+function hasHookCommand(entries: readonly HookEntry[], command: string): boolean {
+  return entries.some(entry =>
+    entry.hooks.some(h => h.command === command),
+  )
+}
+
+/**
+ * Ensure Claude Code's global settings.json has ambient hooks registered.
+ * Adds:
+ *   - SessionStart: echo reminder to call ambient tools
+ *   - UserPromptSubmit: periodic reminder script (every 20 min)
+ *
+ * Idempotent — checks for existing hooks by command string.
+ * Returns { added: string[], skipped: string[] }.
+ */
+export function ensureClaudeHooks(): { added: string[]; skipped: string[] } {
+  const added: string[] = []
+  const skipped: string[] = []
+
+  const settingsPath = join(homedir(), ".claude", "settings.json")
+
+  try {
+    const remindScriptPath = ensureRemindScript()
+
+    // Load or create settings
+    let settings: ClaudeSettings = {}
+    if (existsSync(settingsPath)) {
+      settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as ClaudeSettings
+    } else {
+      // Create ~/.claude/ if needed
+      mkdirSync(join(homedir(), ".claude"), { recursive: true })
+    }
+
+    if (!settings.hooks) {
+      settings.hooks = {}
+    }
+
+    // --- SessionStart: echo reminder ---
+    if (!settings.hooks["SessionStart"]) {
+      settings.hooks["SessionStart"] = []
+    }
+    if (hasHookCommand(settings.hooks["SessionStart"], SESSION_START_ECHO)) {
+      skipped.push("SessionStart")
+    } else {
+      settings.hooks["SessionStart"].push({
+        hooks: [{ type: "command", command: SESSION_START_ECHO }],
+      })
+      added.push("SessionStart")
+    }
+
+    // --- UserPromptSubmit: periodic reminder ---
+    if (!settings.hooks["UserPromptSubmit"]) {
+      settings.hooks["UserPromptSubmit"] = []
+    }
+    if (hasHookCommand(settings.hooks["UserPromptSubmit"], remindScriptPath)) {
+      skipped.push("UserPromptSubmit")
+    } else {
+      settings.hooks["UserPromptSubmit"].push({
+        hooks: [{ type: "command", command: remindScriptPath }],
+      })
+      added.push("UserPromptSubmit")
+    }
+
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n")
+    return { added, skipped }
+  } catch {
+    return { added: [], skipped: ["SessionStart", "UserPromptSubmit"] }
+  }
+}
