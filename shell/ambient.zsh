@@ -10,6 +10,36 @@
 #   - Alt+A widget: inline AI suggestion in the command buffer
 #
 # No external dependencies — uses `r notify` for daemon communication.
+#
+# ── SAFETY: Things you must NEVER do in this file ────────────────────
+#
+# 1. NEVER use `exec` to replace the shell process (e.g. `exec script`,
+#    `exec zsh`, `exec bash`). This causes .zshrc to re-initialize inside
+#    the new process, doubling every startup cost and breaking TUI apps
+#    (Claude Code, vim, htop) that expect a direct PTY from the terminal.
+#
+# 2. NEVER spawn Node.js synchronously during shell init. Any `node ...`
+#    or `npx ...` call blocks the prompt until it finishes. Use cached
+#    output files instead (generate once, source on every shell init).
+#
+# 3. NEVER wrap the shell in a pseudo-TTY layer (script(1), socat PTY,
+#    unbuffer). These add a translation layer that corrupts escape
+#    sequences for alternate screen buffers, cursor positioning, mouse
+#    input, and iTerm2 proprietary sequences (tab colors, shell
+#    integration marks). TUI applications will render incorrectly or
+#    fail to launch entirely.
+#
+# Why these matter:
+#   - This file runs on EVERY new terminal tab, split, and tmux pane
+#   - iTerm2 splits inherit the parent's shell, so a broken init breaks
+#     both the new pane AND can corrupt the original pane's TUI
+#   - Session monitors (like claude-session-monitor) launch shells via
+#     AppleScript `write text "cd ... && claude"` — extra PTY layers
+#     cause race conditions between the shell replacement and the command
+#
+# For output capture, use the `rc` wrapper function defined below, which
+# captures per-command output without affecting the shell itself.
+# ─────────────────────────────────────────────────────────────────────
 
 # --- Resolve the ambient binary ---
 # Use the built binary from the project, or fall back to PATH
@@ -158,10 +188,60 @@ _ambient_accept_line() {
     return
   fi
 
-  # Not NL — let zsh handle it normally
+  # Not NL — check if we should auto-capture output for this command.
+  # Bail out if the buffer contains shell metacharacters that would break
+  # the naive "rc ${buf}" wrapping (pipes, &&, ||, ;, redirections, subshells).
+  if [[ "$buf" != *'|'* && "$buf" != *'&&'* && "$buf" != *'||'* && \
+        "$buf" != *';'* && "$buf" != *'>'* && "$buf" != *'<'* && \
+        "$buf" != *'$('* && "$buf" != *'`'* && "$buf" != *'='* ]]; then
+    if _ambient_should_autocapture "$buf"; then
+      BUFFER="rc ${buf}"
+    fi
+  fi
+
   zle .accept-line
 }
 zle -N accept-line _ambient_accept_line
+
+# --- Whitelist-based auto-capture ---
+# Commands known to be non-interactive and whose output is valuable context.
+# This is a whitelist (not blacklist) — only these commands get auto-wrapped in `rc`.
+# Add to this list as needed. Only non-interactive build/test/lint tools belong here.
+_ambient_autocapture_whitelist=(
+  # Node.js / JS ecosystem
+  pnpm npm yarn npx bun deno tsc tsx eslint prettier vitest jest mocha
+  # Python (not python/python3 — they launch interactive REPL without args)
+  pip pip3 pytest mypy ruff black flake8 pylint uv
+  # Rust
+  cargo rustc clippy
+  # Go
+  go golangci-lint
+  # General build tools
+  make cmake ninja gradle mvn ant
+  # Infrastructure / ops (not docker/kubectl — they can be interactive)
+  terraform pulumi helm
+  # Linters / formatters
+  shellcheck shfmt yamllint jsonlint
+  # Compilers
+  gcc g++ clang javac swift swiftc
+)
+
+_ambient_should_autocapture() {
+  local cmd="$1"
+  local first_word="${cmd%% *}"
+
+  # Resolve aliases to underlying command
+  local resolved
+  resolved=$(command -v "$first_word" 2>/dev/null)
+  if [[ "$resolved" == /* ]]; then
+    first_word="${resolved##*/}"
+  fi
+
+  for w in "${_ambient_autocapture_whitelist[@]}"; do
+    [[ "$first_word" == "$w" ]] && return 0
+  done
+  return 1
+}
 
 # --- ZLE widget: Alt+A for inline AI suggestion ---
 _ambient_ai_suggest() {
@@ -174,8 +254,9 @@ _ambient_ai_suggest() {
   zle reset-prompt
 
   # Query the daemon synchronously (ZLE widgets block)
+  # 4s timeout prevents shell freeze if daemon hangs
   local result
-  result=$(${=AMBIENT_BIN} "Convert to a shell command: $input" 2>/dev/null)
+  result=$(perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} "Convert to a shell command: $input" 2>/dev/null)
 
   if [[ -n "$result" ]]; then
     BUFFER="$result"
