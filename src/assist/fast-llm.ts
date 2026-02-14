@@ -12,8 +12,8 @@
 
 const API_URL = "https://api.anthropic.com/v1/messages"
 const MODEL = "claude-haiku-4-5-20251001"
-const MAX_TOKENS = 200
-const COMPACT_MAX_TOKENS = 500
+const MAX_TOKENS = 8192
+const COMPACT_MAX_TOKENS = 8192
 
 /**
  * Stream a Haiku response, calling onChunk for each text token.
