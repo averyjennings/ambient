@@ -4,7 +4,7 @@ import type { MemoryKey, ProjectMemory, ShellContext, TaskMemory } from "../type
 import { loadProjectMemory, loadTaskMemory } from "./store.js"
 
 const CONTEXT_FILE_PATH = ".ambient/context.md"
-const MAX_BYTES = 2048
+const MAX_BYTES = 4096
 const DEBOUNCE_MS = 1_000
 const GITIGNORE_ENTRY = "\n# Ambient context (auto-generated)\n.ambient/\n"
 

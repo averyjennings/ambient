@@ -72,7 +72,7 @@ async function writeMemoryEvent(
     id: globalThis.crypto.randomUUID(),
     type: eventType,
     timestamp: Date.now(),
-    content: content.slice(0, 500),
+    content: content.slice(0, 1000),
     importance,
     metadata,
   }
@@ -400,7 +400,7 @@ export function createAmbientMcpServer(options: McpServerOptions): McpServer {
     "Update the content of an existing memory event by its ID. Use to correct wrong decisions or update outdated information.",
     {
       eventId: z.string().describe("The ID of the memory event to update"),
-      newContent: z.string().max(500).describe("The updated content to replace the existing content (max 500 chars)"),
+      newContent: z.string().max(1000).describe("The updated content to replace the existing content (max 1000 chars)"),
     },
     async ({ eventId, newContent }) => {
       // Try daemon first (handles context file regeneration)

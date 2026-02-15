@@ -94,9 +94,9 @@ describe("loadProjectMemory / saveProjectMemory", () => {
     expect(loaded!.events[0]!.content).toBe("chose REST over GraphQL")
   })
 
-  it("returns null for TTL-expired project (31 days old)", () => {
+  it("returns null for TTL-expired project (91 days old)", () => {
     const memory = makeProject("pk-expired")
-    memory.lastActive = Date.now() - 31 * 24 * 60 * 60 * 1_000
+    memory.lastActive = Date.now() - 91 * 24 * 60 * 60 * 1_000
     store.saveProjectMemory(memory)
 
     expect(store.loadProjectMemory("pk-expired")).toBeNull()
@@ -125,9 +125,9 @@ describe("loadTaskMemory / saveTaskMemory", () => {
     expect(loaded!.events[0]!.content).toBe("fixed the CORS bug")
   })
 
-  it("returns null for TTL-expired task", () => {
+  it("returns null for TTL-expired task (91 days old)", () => {
     const memory = makeTask("pk-exp", "tk-exp")
-    memory.lastActive = Date.now() - 31 * 24 * 60 * 60 * 1_000
+    memory.lastActive = Date.now() - 91 * 24 * 60 * 60 * 1_000
     store.saveTaskMemory(memory)
 
     expect(store.loadTaskMemory("pk-exp", "tk-exp")).toBeNull()
@@ -277,13 +277,13 @@ describe("updateMemoryEvent", () => {
     expect(store.loadTaskMemory(pk, tk)!.events[0]!.content).toBe("new task content")
   })
 
-  it("truncates content to 500 characters", () => {
+  it("truncates content to 1000 characters", () => {
     const event = makeEvent({ content: "short" })
     store.saveProjectMemory(makeProject(pk, [event]))
 
-    store.updateMemoryEvent(memKey, event.id, "x".repeat(600))
+    store.updateMemoryEvent(memKey, event.id, "x".repeat(1200))
 
-    expect(store.loadProjectMemory(pk)!.events[0]!.content).toHaveLength(500)
+    expect(store.loadProjectMemory(pk)!.events[0]!.content).toHaveLength(1000)
   })
 
   it("bumps lastActive on project store", () => {

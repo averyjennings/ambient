@@ -69,7 +69,7 @@ function sessionKeyFromMemoryKey(key: MemoryKey): string {
 function persistSessionMemory(key: MemoryKey, session: SessionState): void {
   if (!session.lastResponse || session.queryCount < 1) return
 
-  const summary = session.lastResponse.slice(0, 500).trimEnd()
+  const summary = session.lastResponse.slice(0, 1000).trimEnd()
 
   addTaskEvent(key.projectKey, key.taskKey, key.branchName, {
     id: globalThis.crypto.randomUUID(),
@@ -272,7 +272,7 @@ Output only JSON-lines, no other text.`
         id: globalThis.crypto.randomUUID(),
         type: eventType,
         timestamp: Date.now(),
-        content: item.content.slice(0, 500),
+        content: item.content.slice(0, 1000),
         importance,
       }
 
@@ -703,7 +703,7 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
             id: globalThis.crypto.randomUUID(),
             type: eventType,
             timestamp: Date.now(),
-            content: summary.slice(0, 500),
+            content: summary.slice(0, 1000),
             importance: isConversational ? "low" : "medium",
           })
         }, 0)
@@ -721,7 +721,7 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
         id: globalThis.crypto.randomUUID(),
         type: payload.eventType,
         timestamp: Date.now(),
-        content: payload.content.slice(0, 500),
+        content: payload.content.slice(0, 1000),
         importance,
         metadata: payload.metadata,
       } as const

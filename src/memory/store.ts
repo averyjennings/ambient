@@ -15,9 +15,11 @@ export interface LegacyMemoryEntry {
 
 // --- Constants ---
 
-const MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1_000 // 30 days
-const MAX_PROJECT_EVENTS = 50
-const MAX_TASK_EVENTS = 100
+const MEMORY_TTL_MS = 90 * 24 * 60 * 60 * 1_000 // 90 days
+const ARCHIVE_TTL_MS = 7 * 24 * 60 * 60 * 1_000 // 7 days
+const MAX_PROJECT_EVENTS = 200
+const MAX_TASK_EVENTS = 500
+const MAX_CONTENT_LENGTH = 1000
 
 // --- Directory helpers ---
 
@@ -366,7 +368,7 @@ function recencyScore(timestamp: number): number {
  * Search memory for events relevant to a query within a single project.
  * Now uses TF-IDF scoring. For cross-project search, use searchAllMemory().
  */
-export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents = 15): string | null {
+export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents = 30): string | null {
   const project = loadProjectMemory(key.projectKey)
   const task = loadTaskMemory(key.projectKey, key.taskKey)
 
@@ -475,7 +477,7 @@ export function deleteMemoryEvent(memKey: MemoryKey, eventId: string): boolean {
  */
 export function updateMemoryEvent(memKey: MemoryKey, eventId: string, newContent: string): boolean {
   let found = false
-  const truncated = newContent.slice(0, 500)
+  const truncated = newContent.slice(0, MAX_CONTENT_LENGTH)
 
   const project = loadProjectMemory(memKey.projectKey)
   if (project) {
@@ -529,7 +531,7 @@ export function listAllProjects(): string[] {
  *
  * Returns formatted memory string with source labels, or null if no memory exists.
  */
-export function searchAllMemory(query: string, maxEvents = 25): string | null {
+export function searchAllMemory(query: string, maxEvents = 50): string | null {
   const projectKeys = listAllProjects()
   if (projectKeys.length === 0) return null
 
@@ -720,6 +722,24 @@ export function cleanupStaleMemory(): void {
       if (Date.now() - stat.mtimeMs > MEMORY_TTL_MS) {
         // Remove entire project directory (stale)
         rmDirRecursive(join(projectsDir, projectDir))
+        continue
+      }
+
+      // Clean stale archived branch files (7-day TTL)
+      const archivedDir = join(projectsDir, projectDir, "archived")
+      if (existsSync(archivedDir)) {
+        try {
+          for (const file of readdirSync(archivedDir)) {
+            if (!file.endsWith(".json")) continue
+            const filePath = join(archivedDir, file)
+            const fileStat = statSync(filePath)
+            if (Date.now() - fileStat.mtimeMs > ARCHIVE_TTL_MS) {
+              unlinkSync(filePath)
+            }
+          }
+        } catch {
+          // ignore
+        }
       }
     }
   } catch {
@@ -769,8 +789,10 @@ function formatTimeAgo(ms: number): string {
   if (minutes < 60) return `${minutes}m ago`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  // After 24h, show the actual date so agents can reference exact times
+  const date = new Date(Date.now() - ms)
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    + " " + date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
 }
 
 /**

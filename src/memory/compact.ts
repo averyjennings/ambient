@@ -7,8 +7,8 @@ import {
   saveTaskMemory,
 } from "./store.js"
 
-const PROJECT_COMPACT_THRESHOLD = 40  // compact at 40/50
-const TASK_COMPACT_THRESHOLD = 80     // compact at 80/100
+const PROJECT_COMPACT_THRESHOLD = 150  // compact at 150/200
+const TASK_COMPACT_THRESHOLD = 400     // compact at 400/500
 
 /**
  * Check if project events need compaction and run it if so.
@@ -21,7 +21,7 @@ export async function compactProjectIfNeeded(projectKey: string): Promise<void> 
   const compacted = await compactEvents(
     memory.events,
     `project: ${memory.projectName}`,
-    30, // compact oldest 30
+    120, // compact oldest 120
   )
   if (!compacted) return
 
@@ -39,7 +39,7 @@ export async function compactTaskIfNeeded(projectKey: string, taskKey: string): 
   const compacted = await compactEvents(
     memory.events,
     `task: ${memory.branchName}`,
-    60, // compact oldest 60
+    300, // compact oldest 300
   )
   if (!compacted) return
 
