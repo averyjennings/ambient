@@ -586,11 +586,20 @@ async function handleRequest(
       const agentConfig = builtinAgents[agentName]
       let contextBlock = context.formatForPrompt()
 
+      // Add command history
+      const ctx = context.getContext()
+      const queryHistory = ctx.recentCommands.slice(-20)
+        .map(c => `  ${c.exitCode === 0 ? "✓" : "✗"} \`${c.command}\`${c.exitCode !== 0 ? ` (exit ${c.exitCode})` : ""}`)
+        .join("\n")
+      if (queryHistory) {
+        contextBlock += `\n\n[Command history]\n${queryHistory}`
+      }
+
       // Inject persistent memory — search across ALL projects and branches
       if (!shouldContinue) {
         const memoryBlock = searchAllMemory(payload.prompt)
         if (memoryBlock) {
-          contextBlock += `\n\n[Long-term memory — persists across sessions]\n${memoryBlock}`
+          contextBlock += `\n\n[Long-term memory]\n${memoryBlock}`
         }
       }
 
@@ -723,34 +732,26 @@ async function handleRequest(
         context.update({ event: "chpwd", cwd: payload.cwd })
       }
 
-      const contextBlock = context.formatForPrompt()
-      const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
+      const assistContextBlock = context.formatForPrompt()
 
       // Include captured command output — prefer direct payload, fall back to stored
       const rawOutput = payload.output ?? context.getLastOutput()
       const outputBlock = rawOutput
-        ? `\nRecent command output (last lines):\n${rawOutput.slice(-3000)}`
+        ? `\n\n[Command output]\n${rawOutput.slice(-3000)}`
         : ""
 
       // Include recent command history
-      const ctx = context.getContext()
-      const recentHistory = ctx.recentCommands.slice(-20)
+      const assistCtx = context.getContext()
+      const recentHistory = assistCtx.recentCommands.slice(-20)
         .map(c => `  ${c.exitCode === 0 ? "✓" : "✗"} \`${c.command}\`${c.exitCode !== 0 ? ` (exit ${c.exitCode})` : ""}`)
         .join("\n")
-      const historyBlock = recentHistory ? `\nRecent terminal activity:\n${recentHistory}` : ""
+      const historyBlock = recentHistory ? `\n\n[Command history]\n${recentHistory}` : ""
 
       // Search persistent memory across ALL projects — TF-IDF + recency scoring
       const memKey = resolveMemoryKey(payload.cwd)
       const userInput = payload.command
       const assistMemory = searchAllMemory(userInput)
-      const memorySection = assistMemory ? `\nYour long-term memory (persists across sessions — this is what you remember):\n${assistMemory}` : ""
-
-      // Include ambient's own recent interactions so it can refer back to what it said
-      const assistHistoryBlock = recentAssists.length > 0
-        ? "\nRecent ambient interactions:\n" + recentAssists
-            .map(a => `  User typed: \`${a.command}\` (exit ${a.exitCode}) → ambient said: "${a.response.slice(0, 200)}"`)
-            .join("\n")
-        : ""
+      const memoryBlock = assistMemory ? `\n\n[Long-term memory]\n${assistMemory}` : ""
 
       // Classify the input — exit 127 is always conversational (command not found).
       // For other exit codes, apply heuristic detection as a safety net for when
@@ -758,27 +759,16 @@ async function handleRequest(
       const input = payload.command
       const isConversational = payload.exitCode === 127 || looksLikeNaturalLanguage(input)
 
-      const assistPrompt = `You are "ambient", a friendly AI companion that lives in the user's terminal. You have persistent memory about their projects and can see their shell activity.
+      const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
+      const errorContext = isConversational ? "" : `\nThe command \`${input}\` failed with exit code ${payload.exitCode}.${stderrBlock}`
 
-The user typed: \`${input}\`
-${isConversational ? "This was NOT a real command — it was typed as natural language in the terminal. The user is talking to you." : `This command failed with exit code ${payload.exitCode}.${stderrBlock}`}${outputBlock}
+      const assistPrompt = `You are "ambient", a persistent AI companion in the user's terminal. You have long-term memory across sessions and can see their shell activity. Be concise by default — a few sentences for simple questions. Go into full detail only when the user explicitly asks for it.
 
-[Current session context]
-${contextBlock}${historyBlock}
-${memorySection}${assistHistoryBlock}
+[Shell context]
+${assistContextBlock}${historyBlock}${outputBlock}${memoryBlock}${errorContext}
 
-How to respond:
-${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
-- If they're greeting you, greet them back warmly.
-- If they're asking a question, give a thorough answer using your memory and terminal context. Be as detailed as they need.
-- If they ask about "your memory", "what you know", or "what you remember", share ALL specifics from your long-term memory section above. List every concrete fact, project, decision, and error resolution you remember. Do not summarize — be exhaustive.
-- If it looks like a mistyped command (e.g. "gti status"), suggest the correction.
-- Do NOT explain that their input "failed" or "wasn't a command" — they know they're talking to you.
-- Use markdown formatting (headers, bold, lists, code blocks) for readability.
-- Match the depth of your response to the depth of their question.` : `- This was a real command that failed. Help them fix it.
-- If there's stderr output, diagnose the specific error.
-- Suggest the corrected command or a fix.`}
-- Be warm and natural, not robotic.`
+[User]
+${input}`
 
       if (!process.env["ANTHROPIC_API_KEY"]) {
         if (!apiKeyWarned) {
