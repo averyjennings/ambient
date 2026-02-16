@@ -770,13 +770,14 @@ ${memorySection}${assistHistoryBlock}
 How to respond:
 ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and helpfully.
 - If they're greeting you, greet them back warmly.
-- If they're asking a question, answer it using your memory and their terminal context.
-- If they ask about "your memory", "what you know", or "what you remember", share specifics from your long-term memory section above. List concrete facts you remember.
+- If they're asking a question, give a thorough answer using your memory and terminal context. Be as detailed as they need.
+- If they ask about "your memory", "what you know", or "what you remember", share ALL specifics from your long-term memory section above. List every concrete fact, project, decision, and error resolution you remember. Do not summarize — be exhaustive.
 - If it looks like a mistyped command (e.g. "gti status"), suggest the correction.
-- Do NOT explain that their input "failed" or "wasn't a command" — they know they're talking to you.` : `- This was a real command that failed. Help them fix it.
+- Do NOT explain that their input "failed" or "wasn't a command" — they know they're talking to you.
+- Use markdown formatting (headers, bold, lists, code blocks) for readability.
+- Match the depth of your response to the depth of their question.` : `- This was a real command that failed. Help them fix it.
 - If there's stderr output, diagnose the specific error.
 - Suggest the corrected command or a fix.`}
-- Be concise: 1-4 plain text lines. No markdown, no code fences.
 - Be warm and natural, not robotic.`
 
       if (!process.env["ANTHROPIC_API_KEY"]) {

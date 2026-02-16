@@ -82,3 +82,51 @@ Sourced in `.zshrc` — runs on every new tab, split, pane, and scripted shell l
 ## Testing
 
 Tests live in `tests/memory/` (7 files covering the memory subsystem). No tests for CLI, daemon, or agents — those are verified via manual integration testing. Tests use temp directories with cleanup in `beforeEach`/`afterEach`.
+
+<!-- ambient:memory-instructions -->
+<!-- ambient:version:3 -->
+## Ambient Memory (REQUIRED)
+
+Ambient is your persistent memory across sessions, scoped to project and git branch.
+
+### Session start — call ALL THREE before any work:
+1. `get_task_context` — merged project + branch memory
+2. `get_shell_context` — cwd, git state, recent commands, project info
+3. `get_decisions` — past architectural decisions
+
+### Writing memories — call IMMEDIATELY, in the SAME response as the action:
+
+| Trigger | Tool |
+|---|---|
+| You choose between two approaches | `store_decision` (include reasoning) |
+| You reject or revert a previous approach | `store_decision` (supersedes old one) |
+| You discover something surprising about the codebase | `store_decision` |
+| You diagnose and fix a non-obvious bug | `store_error_resolution` |
+| You start a significant chunk of work | `store_task_update` (status: started) |
+| You finish a significant chunk of work | `store_task_update` (status: completed) |
+
+### Cross-session awareness — see what other sessions/projects are doing:
+- `get_recent_activity` — recent events across ALL projects, no query needed
+- `search_all_memory` — search across all projects/branches by keyword
+
+### Debugging context:
+- `get_command_history` — recent commands with exit codes (filter to failures)
+- `get_project_info` — detected project type, scripts, framework
+- `get_recent_output` — last captured command output (from `rc` wrapper)
+
+### Memory management — fix or remove bad memories:
+- `list_memory_events` — browse all events with IDs
+- `update_memory` — correct an existing memory by ID
+- `delete_memory` — remove obsolete/wrong memories by ID
+
+**If MCP tools are NOT available**, use the shell command instead:
+- `ambient remember "Chose JWT with refresh tokens for auth"`
+- `ambient remember --type task-update "Implementing rate limiting"`
+- `ambient remember --type error-resolution "Fixed CORS by adding allowed origins"`
+
+### Rules
+- Call write tools in the SAME response as the action. Not later. Not in bulk.
+- Read existing memories before writing to avoid duplicates.
+- Do not record trivial actions (file reads, ls, etc.).
+- When in doubt, store it.
+<!-- /ambient:memory-instructions -->

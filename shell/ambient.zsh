@@ -151,31 +151,35 @@ _ambient_accept_line() {
   local first_word="${buf%% *}"
   local is_natural=0
 
-  # 1. Unmatched apostrophes that look like contractions (what's, don't, I'm)
-  local singles="${buf//[^\']/}"
-  if (( ${#singles} % 2 != 0 )); then
-    if [[ "$buf" =~ [a-zA-Z]\'[a-zA-Z] ]]; then
-      is_natural=1
-    fi
-  fi
+  # If the first word is a user-defined function or alias, skip NL detection.
+  # The user explicitly typed their command (e.g. `r "query?"`, `reload`) — let it run.
+  # System commands like `what`, `who` are NOT skipped — they're almost always NL.
+  local word_type
+  word_type=$(whence -w "$first_word" 2>/dev/null)
+  if [[ "$word_type" == *": function" || "$word_type" == *": alias" ]]; then
+    # User-defined function/alias — skip all NL detection, execute directly
+    is_natural=0
+  else
+    # Not a user command — check if it's natural language
 
-  # 2. Contains ? in a multi-word context — almost always natural language
-  if (( is_natural == 0 )) && [[ "$buf" == *"?"* ]]; then
-    local word_count=${#${=buf}}
-    if (( word_count >= 2 )); then
-      is_natural=1
+    # 1. Unmatched apostrophes that look like contractions (what's, don't, I'm)
+    local singles="${buf//[^\']/}"
+    if (( ${#singles} % 2 != 0 )); then
+      if [[ "$buf" =~ [a-zA-Z]\'[a-zA-Z] ]]; then
+        is_natural=1
+      fi
     fi
-  fi
 
-  # 3. Starts with a conversational word (2+ words only)
-  #    BUT only if the first word is NOT a user-defined alias or function.
-  #    System commands that share names with conversational words (what, who, help)
-  #    are rare enough that NL intent should take priority. But if the user created
-  #    an alias like `show` or a function like `please`, they clearly intend to use it.
-  if (( is_natural == 0 )) && [[ "$buf" == *" "* ]]; then
-    local word_type
-    word_type=$(whence -w "$first_word" 2>/dev/null)
-    if [[ "$word_type" != *": alias" && "$word_type" != *": function" ]]; then
+    # 2. Contains ? in a multi-word context — almost always natural language
+    if (( is_natural == 0 )) && [[ "$buf" == *"?"* ]]; then
+      local word_count=${#${=buf}}
+      if (( word_count >= 2 )); then
+        is_natural=1
+      fi
+    fi
+
+    # 3. Starts with a conversational word (2+ words only)
+    if (( is_natural == 0 )) && [[ "$buf" == *" "* ]]; then
       local lower_first="${first_word:l}"
       case "$lower_first" in
         what|how|why|where|when|who|can|could|would|should|does|did|is|are|was|were|tell|show|explain|help|hey|hi|hello|thanks|thank|please|yo|sup)
