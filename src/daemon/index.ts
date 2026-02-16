@@ -8,6 +8,8 @@ import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
 import { selectAgent } from "../agents/selector.js"
 import { getSocketPath, getPidPath } from "../config.js"
 import type {
+  ActivityFlushPayload,
+  ActivityPayload,
   AssistPayload,
   CapturePayload,
   ComparePayload,
@@ -33,7 +35,7 @@ import { streamFastLlm, callFastLlm } from "../assist/fast-llm.js"
 import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
-import { ensureAmbientInstructions } from "../setup/claude-md.js"
+import { ensureAmbientInstructions, ensureProjectInstructions } from "../setup/claude-md.js"
 import { ensureClaudeHooks } from "../setup/claude-hooks.js"
 
 const context = new ContextEngine()
@@ -42,6 +44,24 @@ const contextFileGen = new ContextFileGenerator()
 // Per-branch session state — keyed by "projectKey:taskKey"
 const sessions = new Map<string, SessionState>()
 const sessionMemoryKeys = new Map<string, MemoryKey>()
+
+// --- Passive activity monitoring ---
+
+interface ActivityEntry {
+  tool: string
+  filePath?: string
+  command?: string
+  description?: string
+  timestamp: number
+}
+
+const activityBuffers = new Map<string, ActivityEntry[]>()
+const ACTIVITY_FLUSH_THRESHOLD = 30
+const ACTIVITY_BUFFER_MAX = 50
+const ACTIVITY_MIN_FOR_EXTRACTION = 3
+
+// Track project dirs where we've already ensured instruction files
+const instructionsDirs = new Set<string>()
 
 // Suppress repeated API key warnings
 let apiKeyWarned = false
@@ -291,6 +311,112 @@ Output only JSON-lines, no other text.`
   }
 }
 
+/**
+ * Flush the activity buffer for a session, extracting memories via Haiku.
+ * Runs asynchronously — call with setTimeout(0) to avoid blocking.
+ */
+async function flushActivityBuffer(
+  sessionKey: string,
+  memKey: MemoryKey,
+  reasoning?: string,
+): Promise<void> {
+  const entries = activityBuffers.get(sessionKey)
+  activityBuffers.delete(sessionKey)
+
+  if ((!entries || entries.length < ACTIVITY_MIN_FOR_EXTRACTION) && !reasoning) {
+    return
+  }
+
+  // Format activity as compact list
+  const activityLines: string[] = []
+  if (entries) {
+    for (const e of entries) {
+      if (e.filePath) {
+        activityLines.push(`- ${e.tool}: ${e.filePath}`)
+      } else if (e.command) {
+        const cmd = e.command.length > 120 ? e.command.slice(0, 120) + "..." : e.command
+        const desc = e.description ? ` (${e.description})` : ""
+        activityLines.push(`- Bash: ${cmd}${desc}`)
+      } else {
+        activityLines.push(`- ${e.tool}`)
+      }
+    }
+  }
+
+  const activityBlock = activityLines.length > 0
+    ? `Actions performed:\n${activityLines.join("\n")}`
+    : ""
+
+  const reasoningBlock = reasoning
+    ? `\nThe agent explained:\n${reasoning.slice(0, 3000)}`
+    : ""
+
+  if (!activityBlock && !reasoningBlock) return
+
+  const prompt = `You are a memory extraction system. A coding agent just performed these actions in a coding session:
+
+${activityBlock}${reasoningBlock}
+
+Extract ONLY memories that would be useful to recall in a future session:
+- Architecture decisions or library choices made
+- Error patterns: what broke and how it was fixed
+- Significant changes: major refactors, new features, dependency changes
+
+Output JSON-lines: {"type":"decision"|"error-resolution"|"task-update","content":"...","importance":"high"|"medium"|"low"}
+
+CRITICAL: Output NOTHING (completely empty response) if all actions are routine.
+Routine = reading files, running passing tests, minor edits, exploration, formatting.
+Do NOT extract memories for trivial actions. Most flushes should produce 0 memories.
+Maximum 3 items only if something genuinely notable happened.
+
+Output only JSON-lines, no other text.`
+
+  const result = await callFastLlm(prompt, 500)
+  if (!result) return
+
+  let stored = 0
+  for (const line of result.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
+
+    try {
+      const item = JSON.parse(trimmed) as {
+        type?: string
+        content?: string
+        importance?: string
+      }
+
+      if (!item.content || !item.type) continue
+
+      const eventType = (["decision", "error-resolution", "task-update"] as const)
+        .find(t => t === item.type) ?? "task-update"
+      const importance = (["low", "medium", "high"] as const)
+        .find(i => i === item.importance) ?? "medium"
+
+      const event = {
+        id: globalThis.crypto.randomUUID(),
+        type: eventType,
+        timestamp: Date.now(),
+        content: item.content.slice(0, 1000),
+        importance,
+        metadata: { source: "passive" },
+      }
+
+      if (importance === "high") {
+        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
+      }
+      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
+      stored++
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  if (stored > 0) {
+    log("info", `Passive monitoring: extracted ${stored} memories from ${entries?.length ?? 0} tool calls for ${memKey.projectName}:${memKey.branchName}`)
+  }
+}
+
 async function handleRequest(
   socket: import("node:net").Socket,
   request: DaemonRequest,
@@ -378,6 +504,10 @@ async function handleRequest(
       if (existingSession) {
         persistSessionMemory(memKey, existingSession)
       }
+      // Flush passive activity buffer before resetting
+      if (activityBuffers.has(sKey)) {
+        flushActivityBuffer(sKey, memKey).catch(() => {})
+      }
       sessions.delete(sKey)
       sessionMemoryKeys.delete(sKey)
 
@@ -420,6 +550,16 @@ async function handleRequest(
 
       // Resolve per-branch session
       const memKey = resolveMemoryKey(payload.cwd)
+
+      // Ensure project-level agent instruction files on first contact with a directory
+      if (!instructionsDirs.has(payload.cwd)) {
+        instructionsDirs.add(payload.cwd)
+        const projResult = ensureProjectInstructions(payload.cwd)
+        if (projResult.updated.length > 0) {
+          log("info", `Updated project instruction files: ${projResult.updated.join(", ")}`)
+        }
+      }
+
       const sKey = sessionKeyFromMemoryKey(memKey)
       let session = sessions.get(sKey) ?? null
 
@@ -838,6 +978,60 @@ ${isConversational ? `- The user is TALKING TO YOU. Respond conversationally and
       break
     }
 
+    // --- Passive activity monitoring ---
+
+    case "activity": {
+      const payload = request.payload as ActivityPayload
+      const memKey = resolveMemoryKey(payload.cwd)
+      const sKey = sessionKeyFromMemoryKey(memKey)
+
+      let buffer = activityBuffers.get(sKey)
+      if (!buffer) {
+        buffer = []
+        activityBuffers.set(sKey, buffer)
+      }
+
+      buffer.push({
+        tool: payload.tool,
+        filePath: payload.filePath || undefined,
+        command: payload.command || undefined,
+        description: payload.description || undefined,
+        timestamp: Date.now(),
+      })
+
+      // Ring buffer: drop oldest if over max
+      if (buffer.length > ACTIVITY_BUFFER_MAX) {
+        buffer.splice(0, buffer.length - ACTIVITY_BUFFER_MAX)
+      }
+
+      // Auto-flush at threshold
+      if (buffer.length >= ACTIVITY_FLUSH_THRESHOLD) {
+        setTimeout(() => {
+          flushActivityBuffer(sKey, memKey).catch((err: unknown) => {
+            log("warn", `Activity flush failed: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }, 0)
+      }
+
+      sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
+    case "activity-flush": {
+      const payload = request.payload as ActivityFlushPayload
+      const memKey = resolveMemoryKey(payload.cwd)
+      const sKey = sessionKeyFromMemoryKey(memKey)
+
+      setTimeout(() => {
+        flushActivityBuffer(sKey, memKey, payload.reasoning || undefined).catch((err: unknown) => {
+          log("warn", `Activity flush failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }, 0)
+
+      sendResponse(socket, { type: "done", data: "ok" })
+      break
+    }
+
     case "shutdown":
       log("info", "Shutdown requested")
       sendResponse(socket, { type: "done", data: "shutting down" })
@@ -923,6 +1117,13 @@ async function startDaemon(): Promise<void> {
   // Graceful shutdown
   const shutdown = (): void => {
     log("info", "Shutting down...")
+    // Flush all passive activity buffers before exit
+    for (const [sKey] of activityBuffers) {
+      const memKey = sessionMemoryKeys.get(sKey)
+      if (memKey) {
+        flushActivityBuffer(sKey, memKey).catch(() => {})
+      }
+    }
     // Persist all active sessions to memory before exit
     for (const [sKey, session] of sessions) {
       const memKey = sessionMemoryKeys.get(sKey)

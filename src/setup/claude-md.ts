@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs"
+import { join, dirname } from "node:path"
 import { homedir } from "node:os"
 
 const AMBIENT_MARKER_START = "<!-- ambient:memory-instructions -->"
@@ -59,6 +59,66 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 ${AMBIENT_MARKER_END}
 `
 
+// --- Multi-agent instruction file support ---
+
+/**
+ * Known project-level agent instruction files.
+ * When these exist in a project, ambient updates them with memory instructions.
+ */
+const PROJECT_INSTRUCTION_FILES = [
+  "CLAUDE.md",                        // Claude Code
+  "AGENTS.md",                        // OpenAI Codex CLI
+  "GEMINI.md",                        // Google Gemini CLI
+  ".github/copilot-instructions.md",  // GitHub Copilot
+  ".cursorrules",                     // Cursor
+  ".windsurfrules",                   // Windsurf
+  ".goosehints",                      // Goose
+]
+
+/**
+ * Upsert the ambient instruction section into an existing file.
+ * Uses HTML comment markers for idempotent add/update/skip.
+ * Returns "added" | "updated" | "current".
+ */
+function upsertSection(filePath: string): "added" | "updated" | "current" {
+  if (!existsSync(filePath)) {
+    // Ensure parent directory exists, then create
+    const dir = dirname(filePath)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(filePath, AMBIENT_SECTION.trimStart())
+    return "added"
+  }
+
+  const content = readFileSync(filePath, "utf-8")
+
+  if (content.includes(AMBIENT_VERSION_MARKER)) {
+    return "current" // already has the latest version
+  }
+
+  if (content.includes(AMBIENT_MARKER_START)) {
+    // Outdated version — replace the section
+    const startIdx = content.indexOf(AMBIENT_MARKER_START)
+    const endIdx = content.indexOf(AMBIENT_MARKER_END)
+
+    if (endIdx !== -1) {
+      const endOfMarker = endIdx + AMBIENT_MARKER_END.length
+      const before = content.slice(0, startIdx)
+      const after = content.slice(endOfMarker)
+      writeFileSync(filePath, before + AMBIENT_SECTION.trimStart() + after)
+    } else {
+      const before = content.slice(0, startIdx)
+      writeFileSync(filePath, before + AMBIENT_SECTION.trimStart())
+    }
+    return "updated"
+  }
+
+  // No marker at all — append
+  appendFileSync(filePath, AMBIENT_SECTION)
+  return "added"
+}
+
+// --- Global instruction file (~/CLAUDE.md) ---
+
 /**
  * Resolve the path to the user's global CLAUDE.md.
  * Checks ~/CLAUDE.md first (common), then ~/.claude/CLAUDE.md.
@@ -81,44 +141,87 @@ function resolveGlobalClaudeMd(): string {
  * Returns "added" | "updated" | "current" | "failed".
  */
 export function ensureAmbientInstructions(): "added" | "updated" | "current" | "failed" {
-  const claudeMdPath = resolveGlobalClaudeMd()
-
   try {
-    if (existsSync(claudeMdPath)) {
-      const content = readFileSync(claudeMdPath, "utf-8")
-
-      if (content.includes(AMBIENT_VERSION_MARKER)) {
-        return "current" // already has the latest version
-      }
-
-      if (content.includes(AMBIENT_MARKER_START)) {
-        // Outdated version — replace the section
-        const startIdx = content.indexOf(AMBIENT_MARKER_START)
-        const endIdx = content.indexOf(AMBIENT_MARKER_END)
-
-        if (endIdx !== -1) {
-          // Has both markers — clean replacement
-          const endOfMarker = endIdx + AMBIENT_MARKER_END.length
-          const before = content.slice(0, startIdx)
-          const after = content.slice(endOfMarker)
-          writeFileSync(claudeMdPath, before + AMBIENT_SECTION.trimStart() + after)
-        } else {
-          // Old format without end marker — replace from start marker to end of file
-          const before = content.slice(0, startIdx)
-          writeFileSync(claudeMdPath, before + AMBIENT_SECTION.trimStart())
-        }
-        return "updated"
-      }
-
-      // No marker at all — append
-      appendFileSync(claudeMdPath, AMBIENT_SECTION)
-      return "added"
-    }
-
-    // Create new file
-    writeFileSync(claudeMdPath, AMBIENT_SECTION.trimStart())
-    return "added"
+    return upsertSection(resolveGlobalClaudeMd())
   } catch {
     return "failed"
   }
 }
+
+// --- Project-level instruction files ---
+
+export interface ProjectInstructionsResult {
+  /** Files that were updated (already existed, got ambient section added/refreshed) */
+  updated: string[]
+  /** Files that were already current */
+  current: string[]
+}
+
+/**
+ * Update existing agent instruction files in a project directory with ambient instructions.
+ * Only modifies files that ALREADY EXIST — never creates new ones to avoid
+ * cluttering repos with files for agents the user doesn't use.
+ *
+ * Call this on daemon startup for the active cwd, or via `ambient setup`.
+ */
+export function ensureProjectInstructions(projectDir: string): ProjectInstructionsResult {
+  const updated: string[] = []
+  const current: string[] = []
+
+  for (const relPath of PROJECT_INSTRUCTION_FILES) {
+    const fullPath = join(projectDir, relPath)
+    if (!existsSync(fullPath)) continue
+
+    try {
+      const result = upsertSection(fullPath)
+      if (result === "added" || result === "updated") {
+        updated.push(relPath)
+      } else {
+        current.push(relPath)
+      }
+    } catch {
+      // skip files we can't write to
+    }
+  }
+
+  return { updated, current }
+}
+
+/**
+ * Create ambient instruction sections in specified agent instruction files.
+ * Unlike ensureProjectInstructions, this CREATES files that don't exist.
+ * Used by `ambient setup --agents` to initialize instruction files for chosen agents.
+ */
+export function initProjectInstructions(projectDir: string, agents: string[]): string[] {
+  const agentToFile: Record<string, string> = {
+    "claude": "CLAUDE.md",
+    "codex": "AGENTS.md",
+    "gemini": "GEMINI.md",
+    "copilot": ".github/copilot-instructions.md",
+    "cursor": ".cursorrules",
+    "windsurf": ".windsurfrules",
+    "goose": ".goosehints",
+  }
+
+  const created: string[] = []
+
+  for (const agent of agents) {
+    const relPath = agentToFile[agent.toLowerCase()]
+    if (!relPath) continue
+
+    const fullPath = join(projectDir, relPath)
+    try {
+      const result = upsertSection(fullPath)
+      if (result === "added" || result === "updated") {
+        created.push(relPath)
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  return created
+}
+
+/** List of supported agent names for initProjectInstructions. */
+export const SUPPORTED_AGENTS = ["claude", "codex", "gemini", "copilot", "cursor", "windsurf", "goose"] as const

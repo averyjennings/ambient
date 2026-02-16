@@ -141,23 +141,48 @@ async function main(): Promise<void> {
     return
   }
 
-  // Set up Claude Code integration (CLAUDE.md instructions + hooks)
+  // Set up agent integration (instruction files + Claude Code hooks)
   // This runs automatically on daemon startup, but can be triggered manually.
+  // `ambient setup` — global + project-level (existing files only)
+  // `ambient setup --agents codex,gemini` — also create instruction files for named agents
   if (args[0] === "setup") {
-    const { ensureAmbientInstructions } = await import("../setup/claude-md.js")
+    const { ensureAmbientInstructions, ensureProjectInstructions, initProjectInstructions, SUPPORTED_AGENTS } = await import("../setup/claude-md.js")
     const { ensureClaudeHooks } = await import("../setup/claude-hooks.js")
 
+    // Global ~/CLAUDE.md
     const mdResult = ensureAmbientInstructions()
-    const hookResult = ensureClaudeHooks()
+    console.log(`Global ~/CLAUDE.md: ${mdResult}`)
 
-    console.log(`CLAUDE.md instructions: ${mdResult}`)
+    // Claude Code hooks
+    const hookResult = ensureClaudeHooks()
     if (hookResult.added.length > 0) {
       console.log(`Claude Code hooks added: ${hookResult.added.join(", ")}`)
     }
     if (hookResult.skipped.length > 0) {
       console.log(`Claude Code hooks already present: ${hookResult.skipped.join(", ")}`)
     }
-    console.log("Setup complete.")
+
+    // Project-level instruction files (update existing ones)
+    const projectResult = ensureProjectInstructions(process.cwd())
+    if (projectResult.updated.length > 0) {
+      console.log(`Project instruction files updated: ${projectResult.updated.join(", ")}`)
+    }
+    if (projectResult.current.length > 0) {
+      console.log(`Project instruction files current: ${projectResult.current.join(", ")}`)
+    }
+
+    // --agents flag: create instruction files for specific agents
+    const agentsIdx = args.indexOf("--agents")
+    if (agentsIdx !== -1 && args[agentsIdx + 1]) {
+      const agents = args[agentsIdx + 1]!.split(",").map(a => a.trim())
+      const created = initProjectInstructions(process.cwd(), agents)
+      if (created.length > 0) {
+        console.log(`Created instruction files: ${created.join(", ")}`)
+      }
+    }
+
+    console.log(`\nSetup complete. Supported agents: ${SUPPORTED_AGENTS.join(", ")}`)
+    console.log(`To create instruction files for other agents: ambient setup --agents codex,gemini,copilot`)
     return
   }
 
@@ -565,7 +590,8 @@ function printUsage(): void {
   r daemon status                    Show daemon status + session info
 
 \x1b[1mSetup:\x1b[0m
-  r setup                            Set up Claude Code integration (CLAUDE.md + hooks)
+  r setup                            Set up agent integrations (instructions + hooks)
+  r setup --agents codex,gemini      Also create instruction files for named agents
 
 \x1b[1mMCP:\x1b[0m
   r mcp-serve                        Run as MCP server (for agent configs)

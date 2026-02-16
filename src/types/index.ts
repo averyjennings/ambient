@@ -92,8 +92,8 @@ export interface AssistPayload {
 }
 
 export interface DaemonRequest {
-  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist" | "memory-store" | "memory-read" | "memory-delete" | "memory-update" | "memory-search" | "output-read" | "context-read"
-  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | MemoryStorePayload | MemoryReadPayload | MemoryDeletePayload | MemoryUpdatePayload | MemorySearchPayload | ContextReadPayload | Record<string, never>
+  readonly type: "query" | "context-update" | "ping" | "shutdown" | "status" | "new-session" | "agents" | "capture" | "suggest" | "compare" | "assist" | "memory-store" | "memory-read" | "memory-delete" | "memory-update" | "memory-search" | "output-read" | "context-read" | "activity" | "activity-flush"
+  readonly payload: QueryPayload | ContextUpdatePayload | NewSessionPayload | CapturePayload | ComparePayload | AssistPayload | MemoryStorePayload | MemoryReadPayload | MemoryDeletePayload | MemoryUpdatePayload | MemorySearchPayload | ContextReadPayload | ActivityPayload | ActivityFlushPayload | Record<string, never>
 }
 
 export interface QueryPayload {
@@ -224,4 +224,19 @@ export interface MemorySearchPayload {
 
 export interface ContextReadPayload {
   readonly cwd?: string
+}
+
+// --- Passive activity monitoring payloads ---
+
+export interface ActivityPayload {
+  readonly cwd: string
+  readonly tool: string
+  readonly filePath?: string
+  readonly command?: string
+  readonly description?: string
+}
+
+export interface ActivityFlushPayload {
+  readonly cwd: string
+  readonly reasoning?: string
 }
