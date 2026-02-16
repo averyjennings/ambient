@@ -762,10 +762,19 @@ async function handleRequest(
       const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
       const errorContext = isConversational ? "" : `\nThe command \`${input}\` failed with exit code ${payload.exitCode}.${stderrBlock}`
 
+      // Include recent conversation so ambient remembers what the user said
+      let conversationBlock = ""
+      if (recentAssists.length > 0) {
+        const entries = recentAssists.map(a =>
+          `User: ${a.command}\nAmbient: ${a.response.slice(0, 500)}`
+        ).join("\n\n")
+        conversationBlock = `\n\n[Recent conversation]\n${entries}`
+      }
+
       const assistPrompt = `You are "ambient", a persistent AI companion in the user's terminal. You have long-term memory across sessions and can see their shell activity. Be concise by default — a few sentences for simple questions. Go into full detail only when the user explicitly asks for it.
 
 [Shell context]
-${assistContextBlock}${historyBlock}${outputBlock}${memoryBlock}${errorContext}
+${assistContextBlock}${historyBlock}${outputBlock}${memoryBlock}${conversationBlock}${errorContext}
 
 [User]
 ${input}`

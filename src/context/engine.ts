@@ -304,7 +304,7 @@ export class ContextEngine {
     lines.push(`Working directory: ${this.cwd}`)
 
     if (this.gitBranch) {
-      lines.push(`Git branch: ${this.gitBranch}${this.gitDirty ? " (dirty)" : ""}`)
+      lines.push(`Git branch: ${this.gitBranch}${this.gitDirty ? " (uncommitted changes)" : ""}`)
     }
 
     if (this.projectInfo) {
