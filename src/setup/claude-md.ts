@@ -6,7 +6,7 @@ const AMBIENT_MARKER_START = "<!-- ambient:memory-instructions -->"
 const AMBIENT_MARKER_END = "<!-- /ambient:memory-instructions -->"
 
 // Version bump this when the section content changes so existing installs get updated.
-const AMBIENT_SECTION_VERSION = "2"
+const AMBIENT_SECTION_VERSION = "3"
 const AMBIENT_VERSION_MARKER = `<!-- ambient:version:${AMBIENT_SECTION_VERSION} -->`
 
 const AMBIENT_SECTION = `
@@ -17,11 +17,11 @@ ${AMBIENT_VERSION_MARKER}
 Ambient is your persistent memory across sessions, scoped to project and git branch.
 
 ### Session start — call ALL THREE before any work:
-1. \`get_task_context\`
-2. \`get_shell_context\`
-3. \`get_decisions\`
+1. \`get_task_context\` — merged project + branch memory
+2. \`get_shell_context\` — cwd, git state, recent commands, project info
+3. \`get_decisions\` — past architectural decisions
 
-### Write triggers — call IMMEDIATELY when these happen, in the SAME response as the action:
+### Writing memories — call IMMEDIATELY, in the SAME response as the action:
 
 | Trigger | Tool |
 |---|---|
@@ -32,13 +32,27 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 | You start a significant chunk of work | \`store_task_update\` (status: started) |
 | You finish a significant chunk of work | \`store_task_update\` (status: completed) |
 
+### Cross-session awareness — see what other sessions/projects are doing:
+- \`get_recent_activity\` — recent events across ALL projects, no query needed
+- \`search_all_memory\` — search across all projects/branches by keyword
+
+### Debugging context:
+- \`get_command_history\` — recent commands with exit codes (filter to failures)
+- \`get_project_info\` — detected project type, scripts, framework
+- \`get_recent_output\` — last captured command output (from \`rc\` wrapper)
+
+### Memory management — fix or remove bad memories:
+- \`list_memory_events\` — browse all events with IDs
+- \`update_memory\` — correct an existing memory by ID
+- \`delete_memory\` — remove obsolete/wrong memories by ID
+
 **If MCP tools are NOT available**, use the shell command instead:
 - \`ambient remember "Chose JWT with refresh tokens for auth"\`
 - \`ambient remember --type task-update "Implementing rate limiting"\`
 - \`ambient remember --type error-resolution "Fixed CORS by adding allowed origins"\`
 
 ### Rules
-- Call the tool in the SAME response as the action. Not later. Not in bulk.
+- Call write tools in the SAME response as the action. Not later. Not in bulk.
 - Read existing memories before writing to avoid duplicates.
 - Do not record trivial actions (file reads, ls, etc.).
 - When in doubt, store it.

@@ -629,6 +629,53 @@ export function searchAllMemory(query: string, maxEvents = 50): string | null {
   return lines.length > 0 ? lines.join("\n") : null
 }
 
+// --- Cross-session activity feed ---
+
+/**
+ * Get recent memory events across ALL projects and branches, sorted by time.
+ * No query required — pure recency. Lets agents quickly see what other
+ * sessions/projects have been working on.
+ */
+export function getRecentActivity(maxEvents = 30): string | null {
+  const projectKeys = listAllProjects()
+  if (projectKeys.length === 0) return null
+
+  const items: { event: MemoryEvent; projectName: string; branchName: string }[] = []
+
+  for (const pk of projectKeys) {
+    const project = loadProjectMemory(pk)
+    if (!project) continue
+
+    for (const e of project.events) {
+      items.push({ event: e, projectName: project.projectName, branchName: "" })
+    }
+
+    const taskKeys = listTaskKeys(pk)
+    for (const tk of taskKeys) {
+      const task = loadTaskMemory(pk, tk)
+      if (!task) continue
+      for (const e of task.events) {
+        items.push({ event: e, projectName: project.projectName, branchName: task.branchName })
+      }
+    }
+  }
+
+  if (items.length === 0) return null
+
+  // Sort by timestamp descending (most recent first)
+  items.sort((a, b) => b.event.timestamp - a.event.timestamp)
+  const selected = items.slice(0, maxEvents)
+
+  const lines: string[] = []
+  for (const { event, projectName, branchName } of selected) {
+    const source = branchName ? `${projectName} (${branchName})` : projectName
+    const ago = formatTimeAgo(Date.now() - event.timestamp)
+    lines.push(`[${source}] ${event.content} (${event.type}, ${ago})`)
+  }
+
+  return lines.join("\n")
+}
+
 // --- Lifecycle ---
 
 export function archiveTask(projectKey: string, taskKey: string): void {

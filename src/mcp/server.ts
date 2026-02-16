@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import { sendDaemonRequest } from "./daemon-client.js"
 import { resolveMemoryKey } from "../memory/resolve.js"
-import { formatMemoryForPrompt, loadProjectMemory, loadTaskMemory, addTaskEvent, addProjectEvent, deleteMemoryEvent, updateMemoryEvent, searchAllMemory } from "../memory/store.js"
+import { formatMemoryForPrompt, loadProjectMemory, loadTaskMemory, addTaskEvent, addProjectEvent, deleteMemoryEvent, updateMemoryEvent, searchAllMemory, getRecentActivity } from "../memory/store.js"
 import type { ShellContext, MemoryEvent } from "../types/index.js"
 
 interface McpServerOptions {
@@ -389,6 +389,18 @@ export function createAmbientMcpServer(options: McpServerOptions): McpServer {
 
       // Fallback: search directly from disk
       const text = searchAllMemory(query, maxResults ?? 25) ?? "No matching memories found."
+      return { content: [{ type: "text" as const, text }] }
+    },
+  )
+
+  server.tool(
+    "get_recent_activity",
+    "Get recent memory events across ALL projects and branches, sorted by time (most recent first). No query needed — shows what other sessions and projects have been working on.",
+    {
+      limit: z.number().optional().describe("Maximum events to return (default: 30)"),
+    },
+    async ({ limit }) => {
+      const text = getRecentActivity(limit ?? 30) ?? "No memory events found across any projects."
       return { content: [{ type: "text" as const, text }] }
     },
   )
