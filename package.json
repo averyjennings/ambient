@@ -1,12 +1,30 @@
 {
-  "name": "ambient",
+  "name": "ambient-shell",
   "version": "0.1.0",
-  "description": "An agentic shell layer that makes any coding agent ambient and context-aware",
+  "description": "Agentic shell layer — makes any coding agent ambient and context-aware",
   "type": "module",
   "bin": {
     "r": "./dist/cli/index.js",
     "ambient": "./dist/cli/index.js"
   },
+  "files": [
+    "dist/",
+    "shell/",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/averyjennings/ambient.git"
+  },
+  "keywords": [
+    "cli",
+    "shell",
+    "ai",
+    "agent",
+    "context",
+    "memory",
+    "mcp"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -29,6 +47,5 @@
     "typescript": "^5.8.0",
     "vitest": "^4.0.18"
   },
-  "private": true,
   "license": "MIT"
 }
