@@ -2,9 +2,14 @@
 
 import { connect } from "node:net"
 import { spawn, execSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
-import { getSocketPath, getPidPath, loadConfig } from "../config.js"
+import { existsSync, readFileSync, openSync, mkdirSync, statSync, renameSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { homedir } from "node:os"
+import { getSocketPath, getPidPath, getLogPath, loadConfig } from "../config.js"
 import type { DaemonRequest, DaemonResponse, TemplateConfig } from "../types/index.js"
+// Re-export parseArgs for external use (used by tests and consumers)
+export { parseArgs } from "./parse-args.js"
+export type { ParsedCommand } from "./parse-args.js"
 
 function isDaemonAlive(): boolean {
   const pidPath = getPidPath()
@@ -50,9 +55,22 @@ async function ensureDaemonRunning(): Promise<void> {
   }
 
   const daemonScript = new URL("../daemon/index.js", import.meta.url).pathname
+
+  // Set up log file for daemon stderr
+  const logPath = getLogPath()
+  mkdirSync(dirname(logPath), { recursive: true })
+  // Rotate if over 5MB
+  try {
+    const logStat = statSync(logPath)
+    if (logStat.size > 5 * 1024 * 1024) {
+      renameSync(logPath, logPath + ".old")
+    }
+  } catch { /* file may not exist */ }
+  const logFd = openSync(logPath, "a")
+
   const child = spawn(process.execPath, [daemonScript], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", logFd],
   })
   child.unref()
 
@@ -133,6 +151,14 @@ async function main(): Promise<void> {
 
   // --- Subcommands ---
 
+  // Interactive setup wizard
+  if (args[0] === "init") {
+    const { runWizard } = await import("../setup/wizard.js")
+    const nonInteractive = args.includes("--non-interactive") || args.includes("-y")
+    await runWizard({ nonInteractive })
+    return
+  }
+
   // Run as an MCP server (for configuring in agent MCP settings)
   // Usage: Add to Claude Code's MCP config as: node /path/to/ambient/dist/cli/index.js mcp-serve
   if (args[0] === "mcp-serve") {
@@ -194,7 +220,7 @@ async function main(): Promise<void> {
     }
     if (args[1] === "status") {
       await ensureDaemonRunning()
-      await sendRequest({ type: "status", payload: {} })
+      await handleStatusCommand(args.slice(2))
       return
     }
     if (args[1] === "start") {
@@ -204,6 +230,25 @@ async function main(): Promise<void> {
     }
     console.error("Usage: r daemon [start|stop|status]")
     process.exit(1)
+  }
+
+  // Enhanced status command (alias for daemon status)
+  if (args[0] === "status") {
+    await ensureDaemonRunning()
+    await handleStatusCommand(args.slice(1))
+    return
+  }
+
+  // View daemon logs
+  if (args[0] === "logs") {
+    handleLogsCommand(args.slice(1))
+    return
+  }
+
+  // Quick health check
+  if (args[0] === "health") {
+    handleHealthCommand()
+    return
   }
 
   // Fire-and-forget notification to daemon (used by shell hooks)
@@ -343,6 +388,18 @@ async function main(): Promise<void> {
     return
   }
 
+  // Privacy controls
+  if (args[0] === "privacy") {
+    await handlePrivacyCommand(args.slice(1))
+    return
+  }
+
+  // Usage / cost tracking
+  if (args[0] === "usage") {
+    await handleUsageCommand(args.slice(1))
+    return
+  }
+
   // Compare: run multiple agents in parallel on the same query
   if (args[0] === "compare") {
     const compareArgs = args.slice(1)
@@ -477,6 +534,13 @@ async function main(): Promise<void> {
     return
   }
 
+  // Memory browsing UX: list, search, delete, edit, export, import, stats
+  if (args[0] === "memories") {
+    const { handleMemoriesCommand } = await import("./memories.js")
+    await handleMemoriesCommand(args.slice(1))
+    return
+  }
+
   if (args[0] === "--help" || args[0] === "-h" || args.length === 0) {
     printUsage()
     return
@@ -548,6 +612,448 @@ async function main(): Promise<void> {
   })
 }
 
+// --- Format helpers ---
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const remainMin = minutes % 60
+  if (hours < 24) return remainMin > 0 ? `${hours}h ${remainMin}m` : `${hours}h`
+  const days = Math.floor(hours / 24)
+  const remainHours = hours % 24
+  return remainHours > 0 ? `${days}d ${remainHours}h` : `${days}d`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${kb.toFixed(1)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${mb.toFixed(1)} MB`
+  const gb = mb / 1024
+  return `${gb.toFixed(2)} GB`
+}
+
+function formatTokens(count: number): string {
+  if (count < 1000) return String(count)
+  if (count < 1_000_000) return `${(count / 1000).toFixed(1)}K`
+  return `${(count / 1_000_000).toFixed(1)}M`
+}
+
+function formatTimeAgo(timestamp: number): string {
+  const ms = Date.now() - timestamp
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+}
+
+// --- Status command ---
+
+interface StatusData {
+  daemon: {
+    pid: number
+    uptime: number
+    socketPath: string
+    memoryRSS: number
+    startedAt: number
+  }
+  memory: {
+    projectCount: number
+    taskCount: number
+    totalEvents: number
+    diskUsageBytes: number
+    lastCompaction: number | null
+  }
+  sessions: {
+    active: number
+    queriesTotal: number
+    queriesToday: number
+    assistsTotal: number
+    agentsUsed: string[]
+  }
+  usage: {
+    apiRequests: number
+    inputTokens: number
+    outputTokens: number
+    estimatedCost: number
+    allTimeRequests: number
+    allTimeCost: number
+  } | null
+  extractions: {
+    total: number
+    active: number
+    passive: number
+    recent: Array<{ source: string; stored: number; timestamp: number }>
+  }
+  config: {
+    defaultAgent: string
+    apiKeyPresent: boolean
+    availableAgents: string[]
+  }
+}
+
+async function handleStatusCommand(subArgs: string[]): Promise<void> {
+  const isJson = subArgs.includes("--json")
+
+  const socketPath = getSocketPath()
+  await new Promise<void>((resolve) => {
+    const socket = connect(socketPath)
+    socket.on("connect", () => {
+      socket.write(JSON.stringify({ type: "status", payload: {} }) + "\n")
+    })
+    let buf = ""
+    socket.on("data", (data) => {
+      buf += data.toString()
+      const lines = buf.split("\n")
+      buf = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const response = JSON.parse(line) as DaemonResponse
+        if (response.type === "status") {
+          if (isJson) {
+            console.log(response.data)
+          } else {
+            formatStatusOutput(JSON.parse(response.data) as StatusData)
+          }
+        }
+        if (response.type === "done") {
+          socket.end()
+          resolve()
+        }
+      }
+    })
+    socket.on("error", () => resolve())
+  })
+}
+
+function formatStatusOutput(s: StatusData): void {
+  console.log("\n\x1b[1mDaemon\x1b[0m")
+  console.log(`  PID:     ${s.daemon.pid}       Uptime: ${formatUptime(s.daemon.uptime)}`)
+  console.log(`  Socket:  ${s.daemon.socketPath}`)
+  console.log(`  Memory:  ${formatBytes(s.daemon.memoryRSS)} RSS`)
+
+  console.log("\n\x1b[1mMemory Store\x1b[0m")
+  console.log(`  Projects: ${s.memory.projectCount}    Tasks: ${s.memory.taskCount}    Events: ${s.memory.totalEvents}`)
+  console.log(`  Disk:     ${formatBytes(s.memory.diskUsageBytes)}`)
+  if (s.memory.lastCompaction) {
+    console.log(`  Last compaction: ${formatTimeAgo(s.memory.lastCompaction)}`)
+  }
+
+  console.log("\n\x1b[1mSessions\x1b[0m")
+  console.log(`  Active:  ${s.sessions.active}`)
+  console.log(`  Queries: ${s.sessions.queriesToday} today (${s.sessions.queriesTotal} total)`)
+  console.log(`  Assists: ${s.sessions.assistsTotal} total`)
+  if (s.sessions.agentsUsed.length > 0) {
+    console.log(`  Agents:  ${s.sessions.agentsUsed.join(", ")}`)
+  }
+
+  if (s.extractions.total > 0) {
+    console.log("\n\x1b[1mExtractions\x1b[0m")
+    console.log(`  Total: ${s.extractions.total} (active: ${s.extractions.active}, passive: ${s.extractions.passive})`)
+    if (s.extractions.recent.length > 0) {
+      for (const r of s.extractions.recent) {
+        console.log(`    ${r.source}: ${r.stored} memories (${formatTimeAgo(r.timestamp)})`)
+      }
+    }
+  }
+
+  if (s.usage) {
+    console.log("\n\x1b[1mAPI Usage\x1b[0m")
+    console.log(`  Requests: ${s.usage.apiRequests} today`)
+    console.log(`  Tokens:   ${formatTokens(s.usage.inputTokens)} in / ${formatTokens(s.usage.outputTokens)} out`)
+    console.log(`  Cost:     $${s.usage.estimatedCost.toFixed(4)} today ($${s.usage.allTimeCost.toFixed(4)} all-time)`)
+  }
+
+  console.log("\n\x1b[1mConfig\x1b[0m")
+  console.log(`  Default agent: ${s.config.defaultAgent}`)
+  console.log(`  API key:       ${s.config.apiKeyPresent ? "present" : "\x1b[33mmissing\x1b[0m"}`)
+  if (s.config.availableAgents.length > 0) {
+    console.log(`  Agents:        ${s.config.availableAgents.join(", ")}`)
+  }
+  console.log()
+}
+
+// --- Logs command ---
+
+function handleLogsCommand(subArgs: string[]): void {
+  const logPath = getLogPath()
+  if (!existsSync(logPath)) {
+    console.error("No log file found at " + logPath)
+    process.exit(1)
+  }
+
+  const follow = subArgs.includes("-f")
+  const nIdx = subArgs.indexOf("-n")
+  const lines = nIdx >= 0 ? parseInt(subArgs[nIdx + 1] || "50", 10) : 50
+
+  if (follow) {
+    const child = spawn("tail", ["-f", logPath], { stdio: "inherit" })
+    process.on("SIGINT", () => child.kill())
+  } else {
+    const content = readFileSync(logPath, "utf-8")
+    const allLines = content.split("\n")
+    const lastN = allLines.slice(-lines).join("\n")
+    process.stdout.write(lastN + "\n")
+  }
+}
+
+// --- Health command ---
+
+function readPidFile(): number {
+  const pidPath = getPidPath()
+  if (!existsSync(pidPath)) return -1
+  try {
+    const pid = parseInt(readFileSync(pidPath, "utf-8").trim(), 10)
+    process.kill(pid, 0) // test if process exists
+    return pid
+  } catch {
+    return -1
+  }
+}
+
+function handleHealthCommand(): void {
+  const config = loadConfig()
+  let allPassed = true
+
+  const check = (name: string, ok: boolean, detail: string): void => {
+    const icon = ok ? "\x1b[32m+\x1b[0m" : "\x1b[31mx\x1b[0m"
+    console.log(`  ${icon} ${name.padEnd(20)} ${detail}`)
+    if (!ok) allPassed = false
+  }
+
+  console.log("\n\x1b[1mambient health\x1b[0m\n")
+
+  // Check daemon
+  const pid = readPidFile()
+  check("Daemon", pid > 0, pid > 0 ? `running (pid ${pid})` : "not running")
+
+  // Check socket
+  const socketExists = existsSync(config.socketPath)
+  check("Socket", socketExists, socketExists ? config.socketPath : "not found")
+
+  // Check API key
+  const hasKey = !!process.env["ANTHROPIC_API_KEY"]
+  check("API key", hasKey, hasKey ? "ANTHROPIC_API_KEY set" : "missing")
+
+  // Check memory dir
+  const memDir = join(homedir(), ".ambient", "memory")
+  check("Memory dir", existsSync(memDir), memDir)
+
+  // Check Claude hooks
+  const settingsPath = join(homedir(), ".claude", "settings.json")
+  let hooksOk = false
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
+      hooks?: { SessionStart?: unknown[] }
+    }
+    hooksOk = Array.isArray(settings.hooks?.SessionStart) && settings.hooks.SessionStart.length > 0
+  } catch { /* no settings file */ }
+  check("Claude hooks", hooksOk, hooksOk ? "registered" : "not found")
+
+  // Check global CLAUDE.md
+  let mdOk = false
+  for (const p of [join(homedir(), "CLAUDE.md"), join(homedir(), ".claude", "CLAUDE.md")]) {
+    try {
+      const content = readFileSync(p, "utf-8")
+      mdOk = content.includes("ambient:memory-instructions")
+      if (mdOk) break
+    } catch { /* file not found */ }
+  }
+  check("Global CLAUDE.md", mdOk, mdOk ? "ambient section present" : "missing")
+
+  // Check log file
+  const logPath = getLogPath()
+  let logDetail = "not found"
+  try {
+    const logStat = statSync(logPath)
+    logDetail = `${formatBytes(logStat.size)} (${logPath})`
+  } catch { /* no log file */ }
+  check("Log file", existsSync(logPath), logDetail)
+
+  console.log(allPassed ? "\n  All checks passed.\n" : "\n  Some checks failed.\n")
+  process.exit(allPassed ? 0 : 1)
+}
+
+async function handlePrivacyCommand(subArgs: string[]): Promise<void> {
+  const { existsSync: fileExists, readFileSync: readFile, writeFileSync: writeFile, mkdirSync, rmSync } = await import("node:fs")
+  const { join } = await import("node:path")
+  const { homedir } = await import("node:os")
+
+  const ambientDir = join(homedir(), ".ambient")
+  const configPath = join(ambientDir, "config.json")
+  const ignorePath = join(ambientDir, "ignore")
+
+  function readConfig(): Record<string, unknown> {
+    if (!fileExists(configPath)) return {}
+    try {
+      return JSON.parse(readFile(configPath, "utf-8")) as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  }
+
+  function writeConfig(cfg: Record<string, unknown>): void {
+    mkdirSync(ambientDir, { recursive: true })
+    writeFile(configPath, JSON.stringify(cfg, null, 2) + "\n")
+  }
+
+  function getPrivacy(cfg: Record<string, unknown>): Record<string, unknown> {
+    return (cfg["privacy"] as Record<string, unknown>) ?? {}
+  }
+
+  const action = subArgs[0]
+
+  if (action === "local-only") {
+    const value = subArgs[1]
+    if (value !== "on" && value !== "off") {
+      console.error("Usage: ambient privacy local-only on|off")
+      process.exit(1)
+    }
+    const cfg = readConfig()
+    cfg["privacy"] = { ...getPrivacy(cfg), localOnly: value === "on" }
+    writeConfig(cfg)
+    console.log(`Local-only mode: ${value === "on" ? "enabled" : "disabled"}`)
+    console.log("Restart the daemon for changes to take effect: ambient daemon stop && ambient daemon start")
+    return
+  }
+
+  if (action === "monitoring") {
+    const value = subArgs[1]
+    if (value !== "on" && value !== "off") {
+      console.error("Usage: ambient privacy monitoring on|off")
+      process.exit(1)
+    }
+    const cfg = readConfig()
+    cfg["privacy"] = { ...getPrivacy(cfg), passiveMonitoring: value === "on" }
+    writeConfig(cfg)
+    console.log(`Passive monitoring: ${value === "on" ? "enabled" : "disabled"}`)
+    console.log("Restart the daemon for changes to take effect: ambient daemon stop && ambient daemon start")
+    return
+  }
+
+  if (action === "clear") {
+    const memoryDir = join(ambientDir, "memory")
+    if (!fileExists(memoryDir)) {
+      console.log("No memory data found.")
+      return
+    }
+    // Require explicit --yes flag for safety
+    if (!subArgs.includes("--yes")) {
+      console.log(`This will delete all memory in ${memoryDir}`)
+      console.log("Run with --yes to confirm: ambient privacy clear --yes")
+      return
+    }
+    rmSync(memoryDir, { recursive: true, force: true })
+    console.log("All memory data deleted.")
+    return
+  }
+
+  if (action === "ignore") {
+    if (!fileExists(ignorePath)) {
+      console.log("No ignore file found at ~/.ambient/ignore")
+      console.log("Create one with directory patterns (one per line) to opt out of monitoring.")
+      return
+    }
+    const content = readFile(ignorePath, "utf-8")
+    console.log(`\x1b[1mIgnore patterns\x1b[0m (${ignorePath}):\n`)
+    console.log(content)
+    return
+  }
+
+  // Default: show privacy status
+  const cfg = readConfig()
+  const priv = getPrivacy(cfg)
+  const localOnly = priv["localOnly"] === true
+  const monitoring = priv["passiveMonitoring"] !== false
+  const hasIgnore = fileExists(ignorePath)
+
+  console.log(`\x1b[1mAmbient Privacy Status\x1b[0m\n`)
+  console.log(`  Local-only mode:     ${localOnly ? "\x1b[33menabled\x1b[0m (no API calls)" : "\x1b[32mdisabled\x1b[0m"}`)
+  console.log(`  Passive monitoring:  ${monitoring ? "\x1b[32menabled\x1b[0m" : "\x1b[33mdisabled\x1b[0m"}`)
+  console.log(`  Ignore file:         ${hasIgnore ? ignorePath : "\x1b[90mnot configured\x1b[0m"}`)
+  console.log(`  Memory directory:    ${join(ambientDir, "memory")}`)
+  console.log(`  Config file:         ${configPath}`)
+  console.log()
+  console.log(`\x1b[1mData collected:\x1b[0m`)
+  console.log(`  - Command history (recent 50, in-memory only)`)
+  console.log(`  - Memory events (decisions, errors, task updates) stored in ~/.ambient/memory/`)
+  console.log(`  - Passive tool monitoring (file edits, commands by agents)`)
+  console.log()
+  console.log(`\x1b[1mCommands:\x1b[0m`)
+  console.log(`  ambient privacy local-only on|off    Toggle local-only mode (disables API calls)`)
+  console.log(`  ambient privacy monitoring on|off     Toggle passive monitoring`)
+  console.log(`  ambient privacy clear --yes           Delete all stored memory data`)
+  console.log(`  ambient privacy ignore                Show ignore patterns`)
+}
+
+async function handleUsageCommand(subArgs: string[]): Promise<void> {
+  const { join } = await import("node:path")
+  const { homedir } = await import("node:os")
+  const { UsageTracker } = await import("../usage/tracker.js")
+
+  const ambientDir = join(homedir(), ".ambient")
+  const tracker = new UsageTracker(ambientDir)
+  tracker.load()
+
+  // --reset: clear usage data
+  if (subArgs.includes("--reset")) {
+    if (!subArgs.includes("--yes")) {
+      console.log("This will reset all usage tracking data.")
+      console.log("Run with --yes to confirm: ambient usage --reset --yes")
+      return
+    }
+    tracker.reset()
+    console.log("Usage data cleared.")
+    return
+  }
+
+  // --json: raw JSON output
+  if (subArgs.includes("--json")) {
+    const data = {
+      today: tracker.todaySummary(),
+      byPurpose: tracker.summaryByPurpose(),
+      allTime: tracker.allTimeSummary(),
+      dailyBreakdown: tracker.dailyBreakdown(7),
+    }
+    console.log(JSON.stringify(data, null, 2))
+    return
+  }
+
+  // Default: formatted human-readable output
+  const today = tracker.todaySummary()
+  const byPurpose = tracker.summaryByPurpose()
+  const allTime = tracker.allTimeSummary()
+  const dateStr = new Date().toISOString().slice(0, 10)
+
+  const fmtNum = (n: number): string => n.toLocaleString()
+  const fmtCost = (n: number): string => `$${n.toFixed(4)}`
+
+  console.log(`\x1b[1mToday (${dateStr})\x1b[0m`)
+  console.log(`  Requests:  ${fmtNum(today.requestCount)}`)
+  console.log(`  Tokens:    ${fmtNum(today.inputTokens)} in / ${fmtNum(today.outputTokens)} out`)
+  console.log(`  Cost:      ${fmtCost(today.totalCost)}`)
+
+  const purposes = Object.entries(byPurpose)
+  if (purposes.length > 0) {
+    console.log()
+    console.log(`  \x1b[1mBy purpose:\x1b[0m`)
+    for (const [purpose, summary] of purposes) {
+      const calls = summary.requestCount === 1 ? "call" : "calls"
+      console.log(`    ${purpose.padEnd(9)} ${summary.requestCount} ${calls}   ${fmtCost(summary.totalCost)}`)
+    }
+  }
+
+  console.log()
+  console.log(`\x1b[1mAll-time:\x1b[0m ${fmtNum(allTime.requestCount)} calls, ${fmtCost(allTime.totalCost)}`)
+}
+
 function printUsage(): void {
   console.log(`
 \x1b[1mambient\x1b[0m — agentic shell layer
@@ -584,17 +1090,50 @@ function printUsage(): void {
   r remember --type task-update "x"  Store with specific type
   r memory                           Show memories for current project
 
+\x1b[1mMemory browsing:\x1b[0m
+  r memories                         Browse memories (newest first)
+  r memories --type decision         Filter by type
+  r memories --since 7d              Filter by recency
+  r memories search <query>          Search across all projects
+  r memories delete <event-id>       Delete an event
+  r memories edit <event-id>         Edit an event in $EDITOR
+  r memories export                  Export all memory to JSON
+  r memories import <file.json>      Import from JSON
+  r memories stats                   Aggregate statistics
+
+\x1b[1mObservability:\x1b[0m
+  r status                           Full daemon status dashboard
+  r status --json                    Raw JSON status output
+  r health                           Quick diagnostic checks
+  r logs                             Show last 50 lines of daemon log
+  r logs -f                          Follow daemon log in real-time
+  r logs -n 100                      Show last N lines
+
 \x1b[1mDaemon:\x1b[0m
   r daemon start                     Start the background daemon
   r daemon stop                      Stop the daemon
   r daemon status                    Show daemon status + session info
 
 \x1b[1mSetup:\x1b[0m
+  r init                             Interactive setup wizard (shell, API key, hooks)
+  r init -y                          Non-interactive setup (accept all defaults)
   r setup                            Set up agent integrations (instructions + hooks)
   r setup --agents codex,gemini      Also create instruction files for named agents
 
 \x1b[1mMCP:\x1b[0m
   r mcp-serve                        Run as MCP server (for agent configs)
+
+\x1b[1mUsage tracking:\x1b[0m
+  r usage                            Show token usage and costs
+  r usage --json                     Output raw JSON
+  r usage --reset --yes              Clear all usage data
+
+\x1b[1mPrivacy:\x1b[0m
+  r privacy                          Show privacy status and settings
+  r privacy local-only on|off        Toggle local-only mode (no API calls)
+  r privacy monitoring on|off        Toggle passive monitoring
+  r privacy clear --yes              Delete all stored memory data
+  r privacy ignore                   Show ignore patterns from ~/.ambient/ignore
 
 \x1b[1mConfig:\x1b[0m
   r config                           Show config paths
