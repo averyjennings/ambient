@@ -453,6 +453,48 @@ export function searchMemoryForPrompt(key: MemoryKey, query: string, maxEvents =
   return lines.length > 0 ? lines.join("\n") : null
 }
 
+// --- List all events (for CLI browsing) ---
+
+/**
+ * List all memory events for a project/task with source labels.
+ * Returns newest-first. Used by `ambient memories` CLI.
+ */
+export function listAllMemoryEvents(
+  memKey: MemoryKey,
+  options?: {
+    scope?: "project" | "task" | "both"
+    type?: string
+  },
+): Array<{ event: MemoryEvent; source: "project" | "task" }> {
+  const results: Array<{ event: MemoryEvent; source: "project" | "task" }> = []
+  const scope = options?.scope ?? "both"
+
+  if (scope === "project" || scope === "both") {
+    const proj = loadProjectMemory(memKey.projectKey)
+    if (proj) {
+      for (const e of proj.events) {
+        if (!options?.type || e.type === options.type) {
+          results.push({ event: e, source: "project" })
+        }
+      }
+    }
+  }
+
+  if (scope === "task" || scope === "both") {
+    const task = loadTaskMemory(memKey.projectKey, memKey.taskKey)
+    if (task) {
+      for (const e of task.events) {
+        if (!options?.type || e.type === options.type) {
+          results.push({ event: e, source: "task" })
+        }
+      }
+    }
+  }
+
+  results.sort((a, b) => b.event.timestamp - a.event.timestamp)
+  return results
+}
+
 // --- Cross-project search ---
 
 /**
@@ -841,6 +883,80 @@ export function markLegacyMigrated(filePath: string): void {
   } catch {
     // ignore
   }
+}
+
+// --- Stats ---
+
+export interface MemoryStats {
+  projectCount: number
+  taskCount: number
+  totalEvents: number
+  diskUsageBytes: number
+  lastCompaction: number | null
+}
+
+/**
+ * Compute aggregate stats across all stored memory.
+ * Called on-demand (not a hot path).
+ */
+export function getMemoryStats(): MemoryStats {
+  const stats: MemoryStats = {
+    projectCount: 0,
+    taskCount: 0,
+    totalEvents: 0,
+    diskUsageBytes: 0,
+    lastCompaction: null,
+  }
+
+  const projectKeys = listAllProjects()
+  const baseDir = join(homedir(), ".ambient", "memory", "projects")
+
+  for (const pk of projectKeys) {
+    const project = loadProjectMemory(pk)
+    if (!project) continue
+    stats.projectCount++
+    stats.totalEvents += project.events.length
+
+    // Disk usage for project.json
+    try {
+      const projPath = join(baseDir, pk, "project.json")
+      stats.diskUsageBytes += statSync(projPath).size
+    } catch { /* ignore */ }
+
+    // Task files
+    const taskKeys = listTaskKeys(pk)
+    for (const tk of taskKeys) {
+      stats.taskCount++
+      const task = loadTaskMemory(pk, tk)
+      if (task) {
+        stats.totalEvents += task.events.length
+
+        // Check for compaction markers in session-summary metadata
+        for (const e of task.events) {
+          if (e.type === "session-summary" && e.metadata?.["compacted"]) {
+            if (stats.lastCompaction === null || e.timestamp > stats.lastCompaction) {
+              stats.lastCompaction = e.timestamp
+            }
+          }
+        }
+      }
+      try {
+        const taskPath = join(baseDir, pk, "tasks", `${tk}.json`)
+        stats.diskUsageBytes += statSync(taskPath).size
+      } catch { /* ignore */ }
+    }
+
+    // Also check project events for compaction markers
+    for (const e of project.events) {
+      if (e.type === "session-summary" && e.metadata?.["compacted"]) {
+        if (stats.lastCompaction === null || e.timestamp > stats.lastCompaction) {
+          stats.lastCompaction = e.timestamp
+        }
+      }
+    }
+  }
+
+  return stats
 }
 
 // --- Helpers ---

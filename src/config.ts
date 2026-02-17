@@ -56,6 +56,10 @@ export function getConfigPath(): string {
   return join(getAmbientDir(), "config.json")
 }
 
+export function getLogPath(): string {
+  return join(getAmbientDir(), "daemon.log")
+}
+
 export function loadConfig(): AmbientConfig {
   const configPath = getConfigPath()
 
@@ -66,6 +70,11 @@ export function loadConfig(): AmbientConfig {
     maxRecentCommands: 50,
     socketPath: getSocketPath(),
     logLevel: "info",
+    privacy: {
+      localOnly: false,
+      passiveMonitoring: true,
+      ignoreFile: "",
+    },
   }
 
   if (!existsSync(configPath)) {

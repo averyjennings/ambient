@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import { createServer } from "node:net"
-import { existsSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { homedir } from "node:os"
 import { ContextEngine } from "../context/engine.js"
 import { routeToAgent } from "../agents/router.js"
 import { detectAvailableAgents, builtinAgents } from "../agents/registry.js"
@@ -28,18 +30,23 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory, deleteMemoryEvent, updateMemoryEvent, isDuplicateEvent } from "../memory/store.js"
+import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory, deleteMemoryEvent, updateMemoryEvent, getMemoryStats } from "../memory/store.js"
+import { looksLikeNaturalLanguage, classifyCommand, parseAndStoreMemoryJsonLines } from "./classify.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
-import { streamFastLlm, callFastLlm } from "../assist/fast-llm.js"
+import { streamFastLlm, callFastLlm, setUsageTracker } from "../assist/fast-llm.js"
+import { UsageTracker } from "../usage/tracker.js"
 import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
 import { ensureAmbientInstructions, ensureProjectInstructions } from "../setup/claude-md.js"
 import { ensureClaudeHooks } from "../setup/claude-hooks.js"
+import { PrivacyEngine } from "../privacy/engine.js"
 
+const daemonConfig = loadConfig()
 const context = new ContextEngine()
 const contextFileGen = new ContextFileGenerator()
+const privacy = new PrivacyEngine(daemonConfig.privacy)
 
 // Per-branch session state — keyed by "projectKey:taskKey"
 const sessions = new Map<string, SessionState>()
@@ -65,6 +72,51 @@ const instructionsDirs = new Set<string>()
 
 // Suppress repeated API key warnings
 let apiKeyWarned = false
+
+// --- Daemon metrics ---
+
+interface DaemonMetrics {
+  startedAt: number
+  queriesTotal: number
+  assistsTotal: number
+  memoryStoresTotal: number
+  extractionsActive: number
+  extractionsPassive: number
+  sessionsCreated: number
+  queriesToday: number
+  queryTodayDate: string
+}
+
+interface ExtractionRecord {
+  source: "passive" | "active"
+  stored: number
+  timestamp: number
+}
+
+const metrics: DaemonMetrics = {
+  startedAt: Date.now(),
+  queriesTotal: 0,
+  assistsTotal: 0,
+  memoryStoresTotal: 0,
+  extractionsActive: 0,
+  extractionsPassive: 0,
+  sessionsCreated: 0,
+  queriesToday: 0,
+  queryTodayDate: new Date().toISOString().slice(0, 10),
+}
+
+const recentExtractions: ExtractionRecord[] = []
+const MAX_EXTRACTION_RECORDS = 20
+
+function incrementQueryMetrics(): void {
+  const today = new Date().toISOString().slice(0, 10)
+  if (today !== metrics.queryTodayDate) {
+    metrics.queriesToday = 0
+    metrics.queryTodayDate = today
+  }
+  metrics.queriesTotal++
+  metrics.queriesToday++
+}
 
 // Ring buffer of recent assist interactions so ambient remembers what it said
 interface AssistEntry {
@@ -112,186 +164,6 @@ function sendResponse(socket: import("node:net").Socket, response: DaemonRespons
 }
 
 /**
- * Heuristic: does the input look like natural language rather than a shell command?
- * Mirrors the ZLE widget detection in ambient.zsh as a daemon-side safety net.
- */
-function looksLikeNaturalLanguage(input: string): boolean {
-  const trimmed = input.trim()
-  if (!trimmed) return false
-
-  const words = trimmed.split(/\s+/)
-
-  // Single-word inputs are probably commands (or typos), not conversation
-  if (words.length < 2) return false
-
-  // Contains ? in a multi-word context — almost always natural language
-  if (trimmed.includes("?")) return true
-
-  // Starts with a conversational word (not "ambient" — that's the CLI command)
-  const conversationStarters = new Set([
-    "what", "how", "why", "where", "when", "who",
-    "can", "could", "would", "should", "does", "did",
-    "is", "are", "was", "were",
-    "tell", "show", "explain", "help",
-    "hey", "hi", "hello", "thanks", "thank", "please",
-    "yo", "sup",
-  ])
-  const firstWord = (words[0] ?? "").toLowerCase()
-  if (conversationStarters.has(firstWord)) return true
-
-  // Contains contractions (apostrophes between letters) — "what's", "don't", "I'm"
-  if (/[a-zA-Z]'[a-zA-Z]/.test(trimmed) && words.length >= 2) return true
-
-  return false
-}
-
-/**
- * Classify a shell command as notable enough to persist as a memory event.
- * Returns an event type and description, or null if not worth recording.
- */
-function classifyCommand(command: string, exitCode: number): {
-  type: "task-update" | "error-resolution" | "file-context"
-  content: string
-  importance: "low" | "medium"
-} | null {
-  const cmd = command.trim()
-  const words = cmd.split(/\s+/)
-  const base = (words[0] ?? "").toLowerCase()
-
-  // Git operations — branch switches, commits, merges are significant
-  if (base === "git") {
-    const sub = (words[1] ?? "").toLowerCase()
-    if (sub === "checkout" || sub === "switch") {
-      const branch = words.slice(2).filter(w => !w.startsWith("-")).pop() ?? ""
-      if (branch) return { type: "task-update", content: `Switched to branch: ${branch}`, importance: "medium" }
-    }
-    if (sub === "commit") return { type: "task-update", content: `Committed: \`${cmd.slice(0, 120)}\``, importance: "low" }
-    if (sub === "merge") return { type: "task-update", content: `Merged: \`${cmd.slice(0, 120)}\``, importance: "medium" }
-    if (sub === "stash") return { type: "task-update", content: `Stashed changes`, importance: "low" }
-    if (sub === "rebase") return { type: "task-update", content: `Rebased: \`${cmd.slice(0, 120)}\``, importance: "medium" }
-  }
-
-  // Package manager operations
-  if (base === "npm" || base === "pnpm" || base === "yarn" || base === "bun" || base === "pip" || base === "pip3" || base === "cargo") {
-    const sub = (words[1] ?? "").toLowerCase()
-    if (sub === "install" || sub === "add" || sub === "remove" || sub === "uninstall" || sub === "i") {
-      const pkg = words.slice(2).filter(w => !w.startsWith("-")).join(" ")
-      const verb = (sub === "remove" || sub === "uninstall") ? "Removed" : "Installed"
-      if (pkg) return { type: "task-update", content: `${verb}: ${pkg}`, importance: "low" }
-    }
-  }
-
-  // Docker/compose operations
-  if (base === "docker" || base === "docker-compose") {
-    const sub = (words[1] ?? "").toLowerCase()
-    if (sub === "build" || sub === "up" || sub === "down" || sub === "run" || sub === "compose") {
-      const status = exitCode === 0 ? "succeeded" : `failed (exit ${exitCode})`
-      return { type: "task-update", content: `Docker ${words.slice(1, 4).join(" ")} ${status}`, importance: exitCode === 0 ? "low" : "medium" }
-    }
-  }
-
-  // Make targets
-  if (base === "make") {
-    const target = words[1] ?? "default"
-    if (exitCode !== 0) return { type: "error-resolution", content: `make ${target} failed (exit ${exitCode})`, importance: "medium" }
-  }
-
-  // Terraform/infrastructure
-  if (base === "terraform" || base === "tf") {
-    const sub = (words[1] ?? "").toLowerCase()
-    if (sub === "apply" || sub === "plan" || sub === "destroy" || sub === "init") {
-      const status = exitCode === 0 ? "succeeded" : `failed (exit ${exitCode})`
-      return { type: "task-update", content: `terraform ${sub} ${status}`, importance: "medium" }
-    }
-  }
-
-  // Build/test results — record both failures AND successes after a failure
-  const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup)\b/i.test(cmd)
-  const isTest = /\b(test|jest|vitest|mocha|pytest|cargo\s+test|go\s+test)\b/i.test(cmd)
-  const isLint = /\b(lint|eslint|prettier|clippy|ruff)\b/i.test(cmd)
-
-  if (exitCode !== 0) {
-    if (isBuild) return { type: "error-resolution", content: `Build failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
-    if (isTest) return { type: "error-resolution", content: `Tests failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "medium" }
-    if (isLint) return { type: "error-resolution", content: `Lint failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "low" }
-  } else {
-    // Record build/test successes only (they indicate a fix or milestone)
-    if (isBuild) return { type: "task-update", content: `Build passed: \`${cmd.slice(0, 120)}\``, importance: "low" }
-    if (isTest) return { type: "task-update", content: `Tests passed: \`${cmd.slice(0, 120)}\``, importance: "low" }
-  }
-
-  // Any other non-zero exit for multi-word commands (likely real work, not typos)
-  if (exitCode !== 0 && exitCode !== 127 && words.length >= 2) {
-    return { type: "error-resolution", content: `Command failed: \`${cmd.slice(0, 120)}\` (exit ${exitCode})`, importance: "low" }
-  }
-
-  return null
-}
-
-/**
- * Shared helper: parse JSON-lines from Haiku, dedup, and store as memory events.
- * Used by extractAndStoreMemories and flushActivityBuffer.
- * Returns the number of events stored.
- */
-function parseAndStoreMemoryJsonLines(
-  result: string,
-  memKey: MemoryKey,
-  options?: {
-    validTypes?: readonly string[]
-    metadata?: Record<string, string>
-  },
-): number {
-  const validTypes = options?.validTypes ?? ["decision", "error-resolution", "task-update", "file-context"]
-  const storedPrefixes = new Set<string>()
-  let stored = 0
-
-  for (const line of result.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
-
-    try {
-      const item = JSON.parse(trimmed) as {
-        type?: string
-        content?: string
-        importance?: string
-      }
-
-      if (!item.content || !item.type) continue
-      if (!validTypes.includes(item.type)) continue
-
-      const eventType = item.type as "decision" | "error-resolution" | "task-update" | "file-context"
-      const importance = (["low", "medium", "high"] as const)
-        .find(i => i === item.importance) ?? "medium"
-
-      // Dedup: check against both existing events and this batch
-      const prefix = item.content.slice(0, 80).toLowerCase()
-      if (storedPrefixes.has(prefix)) continue
-      if (isDuplicateEvent(memKey.projectKey, memKey.taskKey, item.content)) continue
-      storedPrefixes.add(prefix)
-
-      const event = {
-        id: globalThis.crypto.randomUUID(),
-        type: eventType,
-        timestamp: Date.now(),
-        content: item.content.slice(0, 1000),
-        importance,
-        ...(options?.metadata ? { metadata: options.metadata } : {}),
-      }
-
-      if (importance === "high") {
-        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
-      }
-      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
-      stored++
-    } catch {
-      // skip malformed lines
-    }
-  }
-
-  return stored
-}
-
-/**
  * Extract structured memories from an agent's response using Haiku.
  * Runs async after the response is streamed to the user — zero UX impact.
  */
@@ -329,12 +201,17 @@ Rules:
 
 Output only JSON-lines, no other text.`
 
-  const result = await callFastLlm(extractionPrompt, 1000)
+  const result = await callFastLlm(extractionPrompt, 1000, undefined, "extract")
   if (!result) return
 
   const stored = parseAndStoreMemoryJsonLines(result, memKey)
 
   if (stored > 0) {
+    metrics.extractionsActive++
+    recentExtractions.push({ source: "active", stored, timestamp: Date.now() })
+    if (recentExtractions.length > MAX_EXTRACTION_RECORDS) {
+      recentExtractions.shift()
+    }
     log("info", `Extracted ${stored} memories from agent response for ${memKey.projectName}:${memKey.branchName}`)
   }
 }
@@ -403,7 +280,7 @@ Maximum 3 items only if something genuinely notable happened.
 
 Output only JSON-lines, no other text.`
 
-  const result = await callFastLlm(prompt, 500)
+  const result = await callFastLlm(prompt, 500, undefined, "flush")
   if (!result) return
 
   const stored = parseAndStoreMemoryJsonLines(result, memKey, {
@@ -412,6 +289,11 @@ Output only JSON-lines, no other text.`
   })
 
   if (stored > 0) {
+    metrics.extractionsPassive++
+    recentExtractions.push({ source: "passive", stored, timestamp: Date.now() })
+    if (recentExtractions.length > MAX_EXTRACTION_RECORDS) {
+      recentExtractions.shift()
+    }
     log("info", `Passive monitoring: extracted ${stored} memories from ${entries?.length ?? 0} tool calls for ${memKey.projectName}:${memKey.branchName}`)
   }
 }
@@ -426,34 +308,83 @@ async function handleRequest(
       break
 
     case "status": {
-      const ctx = context.getContext()
-      const memKey = resolveMemoryKey(ctx.cwd)
-      const currentSession = sessions.get(sessionKeyFromMemoryKey(memKey))
-      sendResponse(socket, {
-        type: "status",
-        data: JSON.stringify({
-          cwd: ctx.cwd,
-          gitBranch: ctx.gitBranch,
-          recentCommands: ctx.recentCommands.length,
-          uptime: process.uptime(),
+      const memStats = getMemoryStats()
+      const uptime = (Date.now() - metrics.startedAt) / 1000
+
+      // Try to get usage tracker data
+      let usageData: {
+        apiRequests: number
+        inputTokens: number
+        outputTokens: number
+        estimatedCost: number
+        allTimeRequests: number
+        allTimeCost: number
+      } | null = null
+      try {
+        const usagePath = join(homedir(), ".ambient", "usage.json")
+        const raw = readFileSync(usagePath, "utf-8")
+        const usage = JSON.parse(raw) as {
+          daily?: Record<string, { requestCount?: number; inputTokens?: number; outputTokens?: number; totalCost?: number }>
+          allTime?: { requestCount?: number; totalCost?: number }
+        }
+        const today = new Date().toISOString().slice(0, 10)
+        const todayUsage = usage.daily?.[today]
+        usageData = {
+          apiRequests: todayUsage?.requestCount ?? 0,
+          inputTokens: todayUsage?.inputTokens ?? 0,
+          outputTokens: todayUsage?.outputTokens ?? 0,
+          estimatedCost: todayUsage?.totalCost ?? 0,
+          allTimeRequests: usage.allTime?.requestCount ?? 0,
+          allTimeCost: usage.allTime?.totalCost ?? 0,
+        }
+      } catch { /* no usage data */ }
+
+      const statusData = {
+        daemon: {
           pid: process.pid,
-          activeSessions: sessions.size,
-          session: currentSession
-            ? {
-                agent: currentSession.agentName,
-                queries: currentSession.queryCount,
-                lastResponseLength: currentSession.lastResponse.length,
-              }
-            : null,
+          uptime,
+          socketPath: daemonConfig.socketPath,
+          memoryRSS: process.memoryUsage().rss,
+          startedAt: metrics.startedAt,
+        },
+        memory: memStats,
+        sessions: {
+          active: sessions.size,
+          queriesTotal: metrics.queriesTotal,
+          queriesToday: metrics.queriesToday,
+          assistsTotal: metrics.assistsTotal,
+          agentsUsed: [...new Set(
+            [...sessions.values()].map(s => s.agentName).filter(Boolean),
+          )],
+        },
+        usage: usageData,
+        extractions: {
+          total: metrics.extractionsActive + metrics.extractionsPassive,
+          active: metrics.extractionsActive,
+          passive: metrics.extractionsPassive,
+          recent: recentExtractions.slice(-5),
+        },
+        config: {
+          defaultAgent: daemonConfig.defaultAgent,
+          apiKeyPresent: !!process.env["ANTHROPIC_API_KEY"],
           availableAgents,
-        }),
-      })
+        },
+      }
+
+      sendResponse(socket, { type: "status", data: JSON.stringify(statusData) })
       sendResponse(socket, { type: "done", data: "" })
       break
     }
 
     case "context-update": {
       const payload = request.payload as ContextUpdatePayload
+
+      // Privacy: skip ignored directories entirely
+      if (privacy.isIgnored(payload.cwd)) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
       context.update(payload)
 
       // Trigger context file regeneration
@@ -496,6 +427,7 @@ async function handleRequest(
 
     case "new-session": {
       const payload = request.payload as NewSessionPayload
+      metrics.sessionsCreated++
       const cwd = payload.cwd ?? context.getContext().cwd
       const memKey = resolveMemoryKey(cwd)
       const sKey = sessionKeyFromMemoryKey(memKey)
@@ -535,6 +467,14 @@ async function handleRequest(
 
     case "query": {
       const payload = request.payload as QueryPayload
+      incrementQueryMetrics()
+
+      // Privacy: skip ignored directories
+      if (privacy.isIgnored(payload.cwd)) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
       const config = loadConfig()
 
       // Agent selection: explicit > auto-select > default
@@ -722,9 +662,23 @@ async function handleRequest(
 
     case "assist": {
       const payload = request.payload as AssistPayload
+      metrics.assistsTotal++
 
       // Skip intentional signals (Ctrl+C = 130, Ctrl+Z = 148)
       if (payload.exitCode === 130 || payload.exitCode === 148) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
+      // Privacy: skip ignored directories
+      if (privacy.isIgnored(payload.cwd)) {
+        sendResponse(socket, { type: "done", data: "" })
+        break
+      }
+
+      // Privacy: block API calls in local-only mode
+      if (!privacy.shouldAllowApiCall()) {
+        sendResponse(socket, { type: "chunk", data: "ambient is in local-only mode. API calls are disabled.\n" })
         sendResponse(socket, { type: "done", data: "" })
         break
       }
@@ -756,7 +710,8 @@ async function handleRequest(
       // the ZLE widget doesn't catch natural language (e.g. edge cases).
       const memKey = resolveMemoryKey(payload.cwd)
       const userInput = payload.command
-      const input = payload.command
+      // Sanitize command before sending to LLM — strip inline secrets
+      const input = privacy.sanitize(payload.command)
       const isConversational = payload.exitCode === 127 || looksLikeNaturalLanguage(input)
 
       // Primary: scoped memory for current project + branch
@@ -818,7 +773,7 @@ ${input}`
       const ok = await streamFastLlm(assistPrompt, (text) => {
         assistChunks.push(text)
         sendResponse(socket, { type: "chunk", data: text })
-      }, systemMessage)
+      }, systemMessage, "assist")
 
       if (!ok) {
         log("warn", "Haiku streaming call failed")
@@ -875,6 +830,7 @@ ${input}`
 
     case "memory-store": {
       const payload = request.payload as MemoryStorePayload
+      metrics.memoryStoresTotal++
       const memKey = resolveMemoryKey(payload.cwd)
       const importance = payload.importance ?? "medium"
 
@@ -1003,6 +959,13 @@ ${input}`
 
     case "activity": {
       const payload = request.payload as ActivityPayload
+
+      // Privacy: skip ignored directories and when monitoring is off
+      if (privacy.isIgnored(payload.cwd) || !privacy.isPassiveMonitoringEnabled()) {
+        sendResponse(socket, { type: "done", data: "ok" })
+        break
+      }
+
       const memKey = resolveMemoryKey(payload.cwd)
       const sKey = sessionKeyFromMemoryKey(memKey)
 
@@ -1040,6 +1003,13 @@ ${input}`
 
     case "activity-flush": {
       const payload = request.payload as ActivityFlushPayload
+
+      // Privacy: skip ignored directories and when monitoring is off
+      if (privacy.isIgnored(payload.cwd) || !privacy.isPassiveMonitoringEnabled()) {
+        sendResponse(socket, { type: "done", data: "ok" })
+        break
+      }
+
       const memKey = resolveMemoryKey(payload.cwd)
       const sKey = sessionKeyFromMemoryKey(memKey)
 
@@ -1063,6 +1033,14 @@ ${input}`
 async function startDaemon(): Promise<void> {
   const socketPath = getSocketPath()
   const pidPath = getPidPath()
+
+  // Initialize usage tracker for token/cost monitoring
+  const tracker = new UsageTracker(join(homedir(), ".ambient"), {
+    dailyBudgetUsd: daemonConfig.dailyBudgetUsd ?? null,
+    warnAtPercent: daemonConfig.budgetWarnPercent ?? 80,
+  })
+  tracker.load()
+  setUsageTracker(tracker)
 
   // Detect available agents on startup
   availableAgents = await detectAvailableAgents()
