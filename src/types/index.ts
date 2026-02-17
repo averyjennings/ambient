@@ -129,6 +129,14 @@ export interface TemplateConfig {
   readonly description?: string
 }
 
+// --- Privacy ---
+
+export interface PrivacyConfig {
+  readonly localOnly: boolean
+  readonly passiveMonitoring: boolean
+  readonly ignoreFile: string
+}
+
 // --- Configuration ---
 
 export interface AmbientConfig {
@@ -138,6 +146,16 @@ export interface AmbientConfig {
   readonly maxRecentCommands: number
   readonly socketPath: string
   readonly logLevel: "debug" | "info" | "warn" | "error"
+  readonly llm?: {
+    readonly provider: "anthropic" | "ollama" | "openai-compat"
+    readonly model?: string
+    readonly apiKey?: string
+    readonly baseUrl?: string
+    readonly maxTokens?: number
+  }
+  readonly privacy?: Partial<PrivacyConfig>
+  readonly dailyBudgetUsd?: number | null
+  readonly budgetWarnPercent?: number
 }
 
 // --- Two-level memory system ---
