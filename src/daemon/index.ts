@@ -28,7 +28,7 @@ import type {
   SessionState,
 } from "../types/index.js"
 import { loadConfig } from "../config.js"
-import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory, deleteMemoryEvent, updateMemoryEvent } from "../memory/store.js"
+import { formatMemoryForPrompt, searchAllMemory, addTaskEvent, addProjectEvent, cleanupStaleMemory, loadTaskMemory, deleteMemoryEvent, updateMemoryEvent, isDuplicateEvent } from "../memory/store.js"
 import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm, callFastLlm } from "../assist/fast-llm.js"
@@ -74,7 +74,7 @@ interface AssistEntry {
   readonly timestamp: number
 }
 const recentAssists: AssistEntry[] = []
-const MAX_RECENT_ASSISTS = 5
+const MAX_RECENT_ASSISTS = 50
 
 // Cache of available agents (detected on startup)
 let availableAgents: string[] = []
@@ -229,11 +229,71 @@ function classifyCommand(command: string, exitCode: number): {
 }
 
 /**
+ * Shared helper: parse JSON-lines from Haiku, dedup, and store as memory events.
+ * Used by extractAndStoreMemories and flushActivityBuffer.
+ * Returns the number of events stored.
+ */
+function parseAndStoreMemoryJsonLines(
+  result: string,
+  memKey: MemoryKey,
+  options?: {
+    validTypes?: readonly string[]
+    metadata?: Record<string, string>
+  },
+): number {
+  const validTypes = options?.validTypes ?? ["decision", "error-resolution", "task-update", "file-context"]
+  const storedPrefixes = new Set<string>()
+  let stored = 0
+
+  for (const line of result.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
+
+    try {
+      const item = JSON.parse(trimmed) as {
+        type?: string
+        content?: string
+        importance?: string
+      }
+
+      if (!item.content || !item.type) continue
+      if (!validTypes.includes(item.type)) continue
+
+      const eventType = item.type as "decision" | "error-resolution" | "task-update" | "file-context"
+      const importance = (["low", "medium", "high"] as const)
+        .find(i => i === item.importance) ?? "medium"
+
+      // Dedup: check against both existing events and this batch
+      const prefix = item.content.slice(0, 80).toLowerCase()
+      if (storedPrefixes.has(prefix)) continue
+      if (isDuplicateEvent(memKey.projectKey, memKey.taskKey, item.content)) continue
+      storedPrefixes.add(prefix)
+
+      const event = {
+        id: globalThis.crypto.randomUUID(),
+        type: eventType,
+        timestamp: Date.now(),
+        content: item.content.slice(0, 1000),
+        importance,
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+      }
+
+      if (importance === "high") {
+        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
+      }
+      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
+      stored++
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  return stored
+}
+
+/**
  * Extract structured memories from an agent's response using Haiku.
  * Runs async after the response is streamed to the user — zero UX impact.
- *
- * Haiku reads the user's prompt + agent response and outputs atomic memory
- * items as JSON-lines. Each item has a type, content, and importance level.
  */
 async function extractAndStoreMemories(
   userPrompt: string,
@@ -250,61 +310,29 @@ User asked: "${userPrompt.slice(0, 500)}"
 Agent responded:
 ${agentResponse.slice(0, 6000)}
 
-Extract memories as JSON-lines. Each line must be a valid JSON object with these fields:
-- "type": one of "decision", "error-resolution", "task-update", "file-context"
-- "content": a concise 1-2 sentence fact (not a summary of the whole response)
-- "importance": "high" for architecture/design decisions, "medium" for useful context, "low" for minor details
+Extract memories as JSON-lines. Each line must be a valid JSON object:
+- "type": "decision" | "error-resolution" | "task-update" | "file-context"
+- "content": concise 1-2 sentence fact
+- "importance": importance level (see rules)
+
+Importance rules (STRICT):
+- "high": ONLY for architecture/framework/database/auth strategy decisions that affect the whole project. Most sessions produce 0 high items.
+- "medium": error fixes, config changes, dependency additions, non-trivial patterns
+- "low": file touched, test passed, minor context
 
 Rules:
-- Only extract facts that would be useful to recall in future sessions
-- Each memory should be atomic and self-contained
-- Skip greetings, pleasantries, and meta-commentary
-- Skip things that are obvious from the codebase itself
-- Prefer concrete facts: decisions made, errors resolved, patterns discovered
-- Output NOTHING (empty response) if there's nothing worth remembering
-- Maximum 10 items
+- Only extract facts useful in future sessions
+- Each memory must be atomic and self-contained
+- Skip greetings, pleasantries, meta-commentary, obvious codebase facts
+- Output NOTHING if there's nothing worth remembering
+- Maximum 5 items
 
 Output only JSON-lines, no other text.`
 
   const result = await callFastLlm(extractionPrompt, 1000)
   if (!result) return
 
-  let stored = 0
-  for (const line of result.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
-
-    try {
-      const item = JSON.parse(trimmed) as {
-        type?: string
-        content?: string
-        importance?: string
-      }
-
-      if (!item.content || !item.type) continue
-
-      const eventType = (["decision", "error-resolution", "task-update", "file-context"] as const)
-        .find(t => t === item.type) ?? "task-update"
-      const importance = (["low", "medium", "high"] as const)
-        .find(i => i === item.importance) ?? "medium"
-
-      const event = {
-        id: globalThis.crypto.randomUUID(),
-        type: eventType,
-        timestamp: Date.now(),
-        content: item.content.slice(0, 1000),
-        importance,
-      }
-
-      if (importance === "high") {
-        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
-      }
-      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
-      stored++
-    } catch {
-      // skip malformed lines
-    }
-  }
+  const stored = parseAndStoreMemoryJsonLines(result, memKey)
 
   if (stored > 0) {
     log("info", `Extracted ${stored} memories from agent response for ${memKey.projectName}:${memKey.branchName}`)
@@ -353,20 +381,24 @@ async function flushActivityBuffer(
 
   if (!activityBlock && !reasoningBlock) return
 
-  const prompt = `You are a memory extraction system. A coding agent just performed these actions in a coding session:
+  const prompt = `You are a memory extraction system. A coding agent just performed these actions:
 
 ${activityBlock}${reasoningBlock}
 
-Extract ONLY memories that would be useful to recall in a future session:
-- Architecture decisions or library choices made
+Extract ONLY memories useful in a future session:
+- Architecture decisions or library choices explicitly made
 - Error patterns: what broke and how it was fixed
 - Significant changes: major refactors, new features, dependency changes
 
 Output JSON-lines: {"type":"decision"|"error-resolution"|"task-update","content":"...","importance":"high"|"medium"|"low"}
 
-CRITICAL: Output NOTHING (completely empty response) if all actions are routine.
+Importance rules (STRICT):
+- "high": ONLY for architecture/framework/database decisions. Almost never.
+- "medium": error resolutions, significant code changes
+- "low": everything else worth noting
+
+Output NOTHING (empty response) if all actions are routine.
 Routine = reading files, running passing tests, minor edits, exploration, formatting.
-Do NOT extract memories for trivial actions. Most flushes should produce 0 memories.
 Maximum 3 items only if something genuinely notable happened.
 
 Output only JSON-lines, no other text.`
@@ -374,43 +406,10 @@ Output only JSON-lines, no other text.`
   const result = await callFastLlm(prompt, 500)
   if (!result) return
 
-  let stored = 0
-  for (const line of result.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) continue
-
-    try {
-      const item = JSON.parse(trimmed) as {
-        type?: string
-        content?: string
-        importance?: string
-      }
-
-      if (!item.content || !item.type) continue
-
-      const eventType = (["decision", "error-resolution", "task-update"] as const)
-        .find(t => t === item.type) ?? "task-update"
-      const importance = (["low", "medium", "high"] as const)
-        .find(i => i === item.importance) ?? "medium"
-
-      const event = {
-        id: globalThis.crypto.randomUUID(),
-        type: eventType,
-        timestamp: Date.now(),
-        content: item.content.slice(0, 1000),
-        importance,
-        metadata: { source: "passive" },
-      }
-
-      if (importance === "high") {
-        addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
-      }
-      addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
-      stored++
-    } catch {
-      // skip malformed lines
-    }
-  }
+  const stored = parseAndStoreMemoryJsonLines(result, memKey, {
+    validTypes: ["decision", "error-resolution", "task-update"],
+    metadata: { source: "passive" },
+  })
 
   if (stored > 0) {
     log("info", `Passive monitoring: extracted ${stored} memories from ${entries?.length ?? 0} tool calls for ${memKey.projectName}:${memKey.branchName}`)
@@ -595,11 +594,16 @@ async function handleRequest(
         contextBlock += `\n\n[Command history]\n${queryHistory}`
       }
 
-      // Inject persistent memory — search across ALL projects and branches
+      // Inject persistent memory — scoped to current project + branch
       if (!shouldContinue) {
-        const memoryBlock = searchAllMemory(payload.prompt)
-        if (memoryBlock) {
-          contextBlock += `\n\n[Long-term memory]\n${memoryBlock}`
+        const scopedMemory = formatMemoryForPrompt(memKey)
+        if (scopedMemory) {
+          contextBlock += `\n\n[Long-term memory]\n${scopedMemory}`
+        }
+        // Add limited cross-project context (query handler always has real queries)
+        const crossProject = searchAllMemory(payload.prompt, 10)
+        if (crossProject) {
+          contextBlock += `\n\n[Other projects]\n${crossProject}`
         }
       }
 
@@ -747,33 +751,52 @@ async function handleRequest(
         .join("\n")
       const historyBlock = recentHistory ? `\n\n[Command history]\n${recentHistory}` : ""
 
-      // Search persistent memory across ALL projects — TF-IDF + recency scoring
-      const memKey = resolveMemoryKey(payload.cwd)
-      const userInput = payload.command
-      const assistMemory = searchAllMemory(userInput)
-      const memoryBlock = assistMemory ? `\n\n[Long-term memory]\n${assistMemory}` : ""
-
       // Classify the input — exit 127 is always conversational (command not found).
       // For other exit codes, apply heuristic detection as a safety net for when
       // the ZLE widget doesn't catch natural language (e.g. edge cases).
+      const memKey = resolveMemoryKey(payload.cwd)
+      const userInput = payload.command
       const input = payload.command
       const isConversational = payload.exitCode === 127 || looksLikeNaturalLanguage(input)
+
+      // Primary: scoped memory for current project + branch
+      const scopedMemory = formatMemoryForPrompt(memKey)
+      let memoryBlock = scopedMemory ? `\n\n[Long-term memory]\n${scopedMemory}` : ""
+
+      // Secondary: cross-project context for non-conversational queries
+      if (!isConversational) {
+        const crossProject = searchAllMemory(userInput, 10)
+        if (crossProject) {
+          memoryBlock += `\n\n[Other projects]\n${crossProject}`
+        }
+      }
 
       const stderrBlock = payload.stderr ? `\nStderr: ${payload.stderr.slice(-500)}` : ""
       const errorContext = isConversational ? "" : `\nThe command \`${input}\` failed with exit code ${payload.exitCode}.${stderrBlock}`
 
-      // Include recent conversation so ambient remembers what the user said
+      // Include recent conversation so ambient remembers what the user said.
+      // Recent messages get full responses, older ones get truncated.
       let conversationBlock = ""
       if (recentAssists.length > 0) {
-        const entries = recentAssists.map(a =>
-          `User: ${a.command}\nAmbient: ${a.response.slice(0, 500)}`
-        ).join("\n\n")
-        conversationBlock = `\n\n[Recent conversation]\n${entries}`
+        const lines: string[] = []
+        let budget = 6000
+        for (let i = recentAssists.length - 1; i >= 0 && budget > 0; i--) {
+          const a = recentAssists[i]!
+          const isRecent = i >= recentAssists.length - 10
+          const maxResp = isRecent ? 600 : 150
+          const resp = a.response.length > maxResp
+            ? a.response.slice(0, maxResp) + "..."
+            : a.response
+          const entry = `User: ${a.command}\nAmbient: ${resp}`
+          budget -= entry.length
+          if (budget >= 0) lines.unshift(entry)
+        }
+        conversationBlock = `\n\n[Recent conversation]\n${lines.join("\n\n")}`
       }
 
-      const assistPrompt = `You are "ambient", a persistent AI companion in the user's terminal. You have long-term memory across sessions and can see their shell activity. Be concise by default — a few sentences for simple questions. Go into full detail only when the user explicitly asks for it.
+      const systemMessage = `You are "ambient", a persistent AI companion in the user's terminal. You have long-term memory across sessions and can see their shell activity. Be concise by default — a few sentences for simple questions. Go into full detail only when the user explicitly asks for it.`
 
-[Shell context]
+      const assistPrompt = `[Shell context]
 ${assistContextBlock}${historyBlock}${outputBlock}${memoryBlock}${conversationBlock}${errorContext}
 
 [User]
@@ -795,7 +818,7 @@ ${input}`
       const ok = await streamFastLlm(assistPrompt, (text) => {
         assistChunks.push(text)
         sendResponse(socket, { type: "chunk", data: text })
-      })
+      }, systemMessage)
 
       if (!ok) {
         log("warn", "Haiku streaming call failed")
@@ -817,18 +840,16 @@ ${input}`
 
       sendResponse(socket, { type: "done", data: "" })
 
-      // Record the interaction as a memory event (async, non-blocking)
-      // Skip trivial inputs: greetings, single words, very short exchanges
+      // Record error-assist interactions as permanent memories.
+      // Conversational exchanges (greetings, questions) are ephemeral —
+      // handled by the recentAssists ring buffer for in-session recall,
+      // not worth persisting to disk.
       const assistResponse = assistChunks.join("")
-      const inputWords = input.trim().split(/\s+/).length
-      const isTrivial = inputWords <= 2 && /^(hi|hey|hello|yo|sup|salad|test|ping|lol|ok|yes|no|thanks|bye)\b/i.test(input.trim())
 
-      if (ok && assistResponse.length > 10 && !isTrivial) {
+      if (ok && assistResponse.length > 10 && !isConversational) {
         setTimeout(() => {
-          const summary = isConversational
-            ? `User asked: "${input.slice(0, 150)}". Ambient responded: ${assistResponse.slice(0, 400).replace(/\n/g, " ").trim()}`
-            : `Error with \`${input.slice(0, 100)}\` (exit ${payload.exitCode}). Ambient suggested: ${assistResponse.slice(0, 400).replace(/\n/g, " ").trim()}`
-          const eventType = isConversational ? "session-summary" as const : "error-resolution" as const
+          const summary = `Error with \`${input.slice(0, 100)}\` (exit ${payload.exitCode}). Ambient suggested: ${assistResponse.slice(0, 400).replace(/\n/g, " ").trim()}`
+          const eventType = "error-resolution" as const
 
           // Deduplicate: skip if the most recent event has the same type and similar content
           const existing = loadTaskMemory(memKey.projectKey, memKey.taskKey)
@@ -844,7 +865,7 @@ ${input}`
             type: eventType,
             timestamp: Date.now(),
             content: summary.slice(0, 1000),
-            importance: isConversational ? "low" : "medium",
+            importance: "medium",
           })
         }, 0)
       }

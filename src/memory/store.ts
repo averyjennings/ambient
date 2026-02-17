@@ -304,6 +304,20 @@ export function findSupersededDecision(events: readonly MemoryEvent[], newConten
   return bestId
 }
 
+/**
+ * Check if similar content already exists in recent task events.
+ * Uses prefix match on the first 80 characters (case-insensitive).
+ * Prevents duplicate memories across multiple extraction paths.
+ */
+export function isDuplicateEvent(projectKey: string, taskKey: string, content: string): boolean {
+  const task = loadTaskMemory(projectKey, taskKey)
+  if (!task || task.events.length === 0) return false
+
+  const prefix = content.slice(0, 80).toLowerCase()
+  const recent = task.events.slice(-20)
+  return recent.some(e => e.content.slice(0, 80).toLowerCase() === prefix)
+}
+
 // --- TF-IDF scoring ---
 
 interface ScoredEvent {
