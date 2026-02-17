@@ -1,119 +1,278 @@
 # ambient
 
-**An agentic shell layer that makes any coding agent ambient and context-aware — without entering a TUI.**
+Agentic shell layer -- makes any coding agent ambient and context-aware without a TUI.
 
-Ambient is not a coding agent. It's the layer that makes every coding agent better. It sits in your shell, watches what you do, and gives any agent the context it needs — your cwd, git state, recent commands, project structure — so you can invoke AI naturally alongside your normal workflow.
-
-## How it works
+ambient is not another coding agent. It is the context layer that makes every agent better. Shell hooks passively observe your terminal, a background daemon maintains context and memory, and when you invoke any agent, it gets the full picture -- your working directory, git state, recent commands, past decisions, and captured error output.
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Your normal zsh (unmodified)                   │
-│                                                 │
-│  Shell hooks (preexec/precmd/chpwd) feed the    │
-│  daemon your commands, exit codes, and state.   │
-│                                                 │
-│  r "your question"     → invoke default agent   │
-│  r -a codex "fix this" → pick a specific agent  │
-│  cat log | r "explain" → pipe context in        │
-└──────────────┬──────────────────────────────────┘
-               │ Unix socket
-┌──────────────▼──────────────────────────────────┐
-│  Ambient Daemon                                 │
-│  • Persistent context engine                    │
-│  • Agent router (claude, codex, gemini, goose…) │
-│  • Streams responses back to your terminal      │
-└─────────────────────────────────────────────────┘
+                       Your terminal (unmodified)
+                       ===========================
+                       preexec / precmd / chpwd hooks
+                               |
+                               | fire-and-forget IPC
+                               v
+                       +------------------+
+                       |  Ambient Daemon  |
+                       |  - Context       |       +------------------+
+                       |  - Memory        | ----> |  Agent (claude,  |
+                       |  - Agent router  |       |  codex, gemini,  |
+                       |  - Auto-assist   |       |  goose, aider..) |
+                       +------------------+       +------------------+
+                               |
+                               v
+                       ~/.ambient/memory/
+                       (persistent, JSON)
 ```
 
-## Quick start
+## Quick Start
+
+**Prerequisites:** Node.js >= 20, zsh / bash 4+ / fish 3.1+
 
 ```bash
-# Install dependencies and build
+# Clone and build
+git clone https://github.com/averyjennings/ambient.git
+cd ambient
 pnpm install && pnpm build
 
-# Link the CLI globally
+# Link CLI globally
 pnpm link --global
 
-# Add shell integration to your .zshrc
+# Add shell integration (zsh example)
 echo 'source /path/to/ambient/shell/ambient.zsh' >> ~/.zshrc
 source ~/.zshrc
 
+# Set up agent integrations
+ambient setup
+
 # Start using it
 r "what does this project do"
-r -a codex "fix the failing tests"
-git diff | r "review this"
 ```
 
-## Usage
+For detailed installation instructions, see [Getting Started](docs/getting-started.md).
+
+## Features
+
+### Context Awareness
+
+Shell hooks track your working directory, git branch, recent commands, and exit codes. Zero config -- just source the shell integration and everything is tracked automatically. Your shell runs completely unmodified; all your dotfiles, frameworks, and keybindings work exactly as before.
+
+### Persistent Memory
+
+Two-level memory system: project-wide (survives branch deletion) and per-branch (archived on merge). TF-IDF search across all projects, automatic compaction of old events, and Jaccard-based supersede detection for evolving decisions. All stored as plain JSON files in `~/.ambient/memory/`.
 
 ```bash
-# Natural language query (uses default agent)
-r "refactor the auth module to use JWT"
-
-# Choose a specific agent
-r --agent claude "explain this error"
-r --agent codex "write tests for auth.ts"
-r --agent gemini "summarize the architecture"
-
-# Pipe input as context
-cat error.log | r "why is this failing"
-git diff | r "review these changes"
-
-# Daemon management
-r daemon start
-r daemon stop
-r daemon status
+r remember "chose Postgres over SQLite for production"
+r memory                    # view memories
+ambient memories search "database"   # search across projects
 ```
 
-## Supported agents
+### Multi-Agent Support
 
-Any coding agent with a headless CLI mode works. Built-in support for:
+Eight built-in agents, all invoked as subprocesses with context-enriched prompts:
 
-| Agent | Command | Status |
-|-------|---------|--------|
-| Claude Code | `claude -p` | ✅ |
-| Codex CLI | `codex exec` | ✅ |
-| Gemini CLI | `gemini -p` | ✅ |
-| Goose | `goose run -t` | ✅ |
-| Aider | `aider -m` | ✅ |
-| Copilot CLI | `copilot -p` | ✅ |
-| OpenCode | `opencode run` | ✅ |
-| gptme | `gptme --non-interactive` | ✅ |
+| Agent | Command | Session Support |
+|-------|---------|:--------------:|
+| Claude Code | `claude -p` | multi-turn |
+| Codex CLI | `codex exec` | -- |
+| Gemini CLI | `gemini -p` | -- |
+| Goose | `goose run -t` | -- |
+| Aider | `aider --message` | -- |
+| Copilot CLI | `copilot -p` | -- |
+| OpenCode | `opencode run` | multi-turn |
+| gptme | `gptme --non-interactive` | -- |
 
-## Shell integration
+```bash
+r "refactor the auth module"          # default agent
+r -a codex "write tests for auth.ts"  # specific agent
+r compare -a claude,gemini "explain"  # compare agents side-by-side
+r agents                              # list installed agents
+```
 
-The zsh integration installs three hooks:
+### Inline Assist
 
-- **preexec** — tells the daemon what command is about to run
-- **precmd** — tells the daemon the exit code and current state
-- **chpwd** — tells the daemon when you change directories
+Type natural language directly in your terminal and get instant answers powered by Claude Haiku. No need to prefix with `r` -- the shell hooks detect natural language and route it automatically.
 
-Plus **Alt+A** for inline AI suggestions in your command buffer.
+```
+what does this function do          # detected as NL, routed to assist
+why did the build fail              # instant answer with captured output
+```
 
-Your zsh runs completely unmodified — all your dotfiles, oh-my-zsh, aliases, and keybindings work exactly as before.
+Press **Alt+A** to convert a natural language description in your command buffer into a shell command.
+
+### Templates
+
+Built-in templates combine a prompt with an optional command whose output provides context:
+
+```bash
+r review          # git diff + code review
+r review-staged   # git diff --cached + review
+r commit          # git diff --cached + commit message
+r fix             # fix last failed command
+r test src/foo.ts # generate tests
+r explain         # explain code or output
+r templates       # list all templates
+```
+
+Custom templates go in `~/.ambient/config.json`.
+
+### Output Capture
+
+The `rc` wrapper captures command output for ambient to use as context:
+
+```bash
+rc pnpm build     # build output captured
+r fix             # agent sees the captured error
+```
+
+In zsh and fish, whitelisted build tools (`pnpm`, `cargo`, `pytest`, `make`, `tsc`, etc.) are auto-wrapped -- no need to type `rc` explicitly.
+
+### Memory Browsing
+
+Full-featured memory management from the command line:
+
+```bash
+ambient memories                        # browse (newest first)
+ambient memories --type decision        # filter by type
+ambient memories --since 7d             # filter by recency
+ambient memories search "auth"          # search across projects
+ambient memories delete <id>            # delete an event
+ambient memories edit <id>              # edit in $EDITOR
+ambient memories export > backup.json   # export all memory
+ambient memories import backup.json     # import from backup
+ambient memories stats                  # aggregate statistics
+```
+
+### Privacy Controls
+
+All data stays on your machine. API calls can be disabled entirely, directories can be excluded, and secrets are automatically redacted.
+
+```bash
+ambient privacy                         # show privacy status
+ambient privacy local-only on           # disable all API calls
+ambient privacy monitoring off          # disable passive monitoring
+```
+
+See [Privacy](docs/privacy.md) for full details.
+
+### Cost Tracking
+
+Track API token usage and costs with daily breakdowns and budget limits:
+
+```bash
+ambient usage                # today's usage + all-time totals
+ambient usage --json         # raw JSON output
+ambient usage --reset --yes  # clear usage data
+```
+
+### MCP Integration
+
+12 tools and 5 resources for agents that support the Model Context Protocol. Claude Code, and any MCP-aware agent, can access ambient's context and memory directly.
+
+**Resources:** `ambient://context`, `ambient://history`, `ambient://project`, `ambient://memory/project`, `ambient://memory/task`
+
+**Tools:** `get_shell_context`, `get_command_history`, `get_project_info`, `get_task_context`, `get_decisions`, `get_recent_output`, `search_all_memory`, `list_memory_events`, `store_decision`, `store_task_update`, `store_error_resolution`, `update_memory`, `delete_memory`
+
+Register the MCP server in your agent's config as:
+
+```
+node /path/to/ambient/dist/cli/index.js mcp-serve
+```
+
+## Supported Shells
+
+| Feature | zsh | bash 4+ | fish 3.1+ |
+|---------|:---:|:-------:|:---------:|
+| Passive hooks (preexec/precmd/chpwd) | yes | yes | yes |
+| Natural language interception | yes | -- | yes |
+| Alt+A command suggestion | yes | yes | yes |
+| Auto-capture (whitelisted commands) | yes | -- | yes |
+| `rc` output capture wrapper | yes | yes | yes |
+| `command_not_found` handler | yes | yes | yes |
+
+Bash limitations: no Enter-key natural language interception (no ZLE equivalent) and no auto-capture wrapping (DEBUG trap cannot modify commands). Use `rc <cmd>` explicitly for output capture, and prefix queries with `r` for natural language.
+
+## Observability
+
+```bash
+r status              # full daemon dashboard (pid, uptime, memory, sessions, usage)
+r status --json       # raw JSON
+r health              # quick diagnostic checks
+r logs                # last 50 lines of daemon log
+r logs -f             # follow log in real-time
+r logs -n 200         # last N lines
+```
 
 ## Configuration
 
-```bash
-# Config lives at ~/.ambient/config.json
-r config
-```
+Config file: `~/.ambient/config.json`
 
 ```json
 {
   "defaultAgent": "claude",
-  "logLevel": "info"
+  "logLevel": "info",
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001"
+  },
+  "privacy": {
+    "localOnly": false,
+    "passiveMonitoring": true
+  },
+  "templates": {
+    "security": {
+      "command": "git diff",
+      "prompt": "Audit these changes for security issues.",
+      "description": "Security review"
+    }
+  }
 }
 ```
 
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `defaultAgent` | `"claude"` | Agent for `r "query"` (or `"auto"` for auto-selection) |
+| `logLevel` | `"info"` | Daemon log verbosity |
+| `templates` | (built-ins) | Custom templates merged with built-ins |
+| `privacy.localOnly` | `false` | Disable all API calls |
+| `privacy.passiveMonitoring` | `true` | Observe agent tool calls |
+| `llm.provider` | `"anthropic"` | LLM provider: `anthropic`, `ollama`, `openai-compat` |
+| `llm.model` | `"claude-haiku-4-5-20251001"` | Model for fast LLM calls |
+| `dailyBudgetUsd` | (none) | Daily API cost limit |
+
+## LLM Providers
+
+Ambient uses a fast LLM for inline assist, memory extraction, and compaction. This is separate from the agents you invoke.
+
+**Anthropic (default):** Set `ANTHROPIC_API_KEY` in your environment. Uses Claude Haiku.
+
+**Ollama (fully local):** Configure `"llm": { "provider": "ollama", "model": "llama3.2" }`. No API key needed, nothing leaves your machine.
+
+**OpenAI-compatible:** Configure `"llm": { "provider": "openai-compat", "baseUrl": "https://your-endpoint/v1" }`. Set `OPENAI_API_KEY`.
+
+## Privacy
+
+All data stays on your machine. No cloud storage, no database, plain JSON files. API calls can be fully disabled with local-only mode. Secrets are automatically redacted before any data is sent. See [Privacy](docs/privacy.md) for the complete details.
+
 ## Architecture
 
-- **Daemon** (`src/daemon/`) — persistent background process on a Unix socket. Maintains the context engine and routes requests to agents.
-- **CLI** (`src/cli/`) — the `r` command. Thin client that talks to the daemon. Auto-starts the daemon on first use.
-- **Context Engine** (`src/context/`) — tracks cwd, git state, recent commands, exit codes, project type. Fed by shell hooks.
-- **Agent Router** (`src/agents/`) — invokes any agent as a subprocess with context-enriched prompts. Streams output back.
-- **Shell Integration** (`shell/`) — thin zsh hooks (~80 lines) that feed the daemon and expose the `r` function.
+Three entry points, one data flow: shell hooks feed the daemon, the daemon maintains context and memory, and agents get called with enriched prompts. ~5,100 lines of TypeScript + 325 lines of zsh, two runtime dependencies (`@modelcontextprotocol/sdk` and `zod`), no database, no bundler. See [Architecture](docs/ARCHITECTURE.md) for the deep dive.
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md) -- installation, first session, configuration
+- [How Memory Works](docs/memory-guide.md) -- two-level memory, search, compaction, lifecycle
+- [Privacy](docs/privacy.md) -- data collection, API calls, opting out
+- [Architecture](docs/ARCHITECTURE.md) -- technical deep dive into every subsystem
+
+## Contributing
+
+```bash
+pnpm install          # install dependencies
+pnpm build            # compile TypeScript
+pnpm test             # run tests (vitest)
+pnpm typecheck        # type check without emitting
+pnpm dev              # watch mode
+```
 
 ## License
 
