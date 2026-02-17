@@ -1,54 +1,34 @@
 # ambient
 
-Agentic shell layer -- makes any coding agent ambient and context-aware without a TUI.
+**Your terminal, with memory.**
 
-ambient is not another coding agent. It is the context layer that makes every agent better. Shell hooks passively observe your terminal, a background daemon maintains context and memory, and when you invoke any agent, it gets the full picture -- your working directory, git state, recent commands, past decisions, and captured error output.
+[![CI](https://github.com/averyjennings/ambient/actions/workflows/ci.yml/badge.svg)](https://github.com/averyjennings/ambient/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ambient-shell)](https://www.npmjs.com/package/ambient-shell)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-```
-                       Your terminal (unmodified)
-                       ===========================
-                       preexec / precmd / chpwd hooks
-                               |
-                               | fire-and-forget IPC
-                               v
-                       +------------------+
-                       |  Ambient Daemon  |
-                       |  - Context       |       +------------------+
-                       |  - Memory        | ----> |  Agent (claude,  |
-                       |  - Agent router  |       |  codex, gemini,  |
-                       |  - Auto-assist   |       |  goose, aider..) |
-                       +------------------+       +------------------+
-                               |
-                               v
-                       ~/.ambient/memory/
-                       (persistent, JSON)
-```
+Shell hooks observe your commands, exit codes, and working directory. A background daemon maintains context and persistent memory. When any coding agent -- Claude, Codex, Gemini, Goose, Aider -- is invoked, it gets the full picture. No TUI, no wrapper, just context.
+
+<p align="center">
+  <img src="docs/demo.gif" alt="ambient demo" width="800">
+</p>
 
 ## Quick Start
 
 **Prerequisites:** Node.js >= 20, zsh / bash 4+ / fish 3.1+
 
 ```bash
-# Clone and build
+# Install
 git clone https://github.com/averyjennings/ambient.git
-cd ambient
-pnpm install && pnpm build
+cd ambient && pnpm install && pnpm build && pnpm link --global
 
-# Link CLI globally
-pnpm link --global
-
-# Add shell integration (zsh example)
-echo 'source /path/to/ambient/shell/ambient.zsh' >> ~/.zshrc
-source ~/.zshrc
-
-# Set up agent integrations
-ambient setup
+# Set up everything (shell hooks, daemon, agent integrations)
+ambient init
 
 # Start using it
 r "what does this project do"
 ```
 
-For detailed installation instructions, see [Getting Started](docs/getting-started.md).
+For detailed instructions, see [Getting Started](docs/getting-started.md).
 
 ## Features
 
@@ -266,12 +246,13 @@ Three entry points, one data flow: shell hooks feed the daemon, the daemon maint
 
 ## Contributing
 
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for setup, development workflow, and guidelines.
+
 ```bash
-pnpm install          # install dependencies
-pnpm build            # compile TypeScript
-pnpm test             # run tests (vitest)
-pnpm typecheck        # type check without emitting
-pnpm dev              # watch mode
+pnpm install && pnpm build    # build
+pnpm test                     # 379 tests
+pnpm typecheck                # strict mode
+pnpm dev                      # watch mode
 ```
 
 ## License
