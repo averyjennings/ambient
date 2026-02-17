@@ -116,5 +116,5 @@ ${formatted}
 
 Output only the summary paragraph, nothing else.`
 
-  return callFastLlm(prompt)
+  return callFastLlm(prompt, undefined, undefined, "compact")
 }
