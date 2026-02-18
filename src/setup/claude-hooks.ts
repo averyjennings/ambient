@@ -24,11 +24,11 @@ ELAPSED=$((NOW - LAST))
 # Remind every 20 minutes (1200 seconds)
 if [ "$ELAPSED" -gt 1200 ]; then
     echo "$NOW" > "$REMIND_FILE"
-    echo "AMBIENT: If context is stale or was cleared, call get_task_context and get_decisions. Store any unmemoried decisions, error resolutions, or task completions NOW."
+    echo "AMBIENT: If context is stale or was cleared, call get_task_context and get_decisions. Store any unmemoried decisions, error resolutions, or task completions NOW — before moving on."
 fi
 `
 
-const SESSION_START_ECHO = "echo 'AMBIENT: Call get_task_context, get_shell_context, AND get_decisions NOW before doing any work. Store decisions in the SAME response as the action — not later.'"
+const SESSION_START_ECHO = "echo 'AMBIENT: Call get_task_context, get_shell_context, AND get_decisions NOW before doing any work. Store decisions BEFORE moving on to the next topic — not later, not in bulk.'"
 
 interface HookEntry {
   readonly matcher?: string

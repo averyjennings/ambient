@@ -6,7 +6,7 @@ const AMBIENT_MARKER_START = "<!-- ambient:memory-instructions -->"
 const AMBIENT_MARKER_END = "<!-- /ambient:memory-instructions -->"
 
 // Version bump this when the section content changes so existing installs get updated.
-const AMBIENT_SECTION_VERSION = "3"
+const AMBIENT_SECTION_VERSION = "4"
 const AMBIENT_VERSION_MARKER = `<!-- ambient:version:${AMBIENT_SECTION_VERSION} -->`
 
 const AMBIENT_SECTION = `
@@ -21,7 +21,7 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 2. \`get_shell_context\` — cwd, git state, recent commands, project info
 3. \`get_decisions\` — past architectural decisions
 
-### Writing memories — call IMMEDIATELY, in the SAME response as the action:
+### Writing memories — store BEFORE moving on to the next topic or tool call:
 
 | Trigger | Tool |
 |---|---|
@@ -52,7 +52,8 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 - \`ambient remember --type error-resolution "Fixed CORS by adding allowed origins"\`
 
 ### Rules
-- Call write tools in the SAME response as the action. Not later. Not in bulk.
+- Store memories BEFORE moving on — if you just diagnosed a root cause, made an architectural choice, or resolved a non-obvious error, store it before your next action, even if the fix isn't complete yet.
+- During multi-step debugging, store findings at each checkpoint (diagnosis, root cause, resolution) rather than waiting until the end.
 - Read existing memories before writing to avoid duplicates.
 - Do not record trivial actions (file reads, ls, etc.).
 - When in doubt, store it.
