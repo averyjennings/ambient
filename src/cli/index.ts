@@ -174,6 +174,8 @@ async function main(): Promise<void> {
   if (args[0] === "setup") {
     const { ensureAmbientInstructions, ensureProjectInstructions, initProjectInstructions, SUPPORTED_AGENTS } = await import("../setup/claude-md.js")
     const { ensureClaudeHooks } = await import("../setup/claude-hooks.js")
+    const { ensureGlobalGitignore } = await import("../setup/gitignore.js")
+    const { ensureMcpRegistration } = await import("../setup/mcp-register.js")
 
     // Global ~/CLAUDE.md
     const mdResult = ensureAmbientInstructions()
@@ -187,6 +189,14 @@ async function main(): Promise<void> {
     if (hookResult.skipped.length > 0) {
       console.log(`Claude Code hooks already present: ${hookResult.skipped.join(", ")}`)
     }
+
+    // MCP server registration
+    const mcpResult = ensureMcpRegistration()
+    console.log(`MCP server registration: ${mcpResult}`)
+
+    // Global gitignore
+    const gitignoreResult = ensureGlobalGitignore()
+    console.log(`Global gitignore (.ambient/): ${gitignoreResult}`)
 
     // Project-level instruction files (update existing ones)
     const projectResult = ensureProjectInstructions(process.cwd())

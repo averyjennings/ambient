@@ -7,6 +7,8 @@ import { installShellHooks, getShellScriptPath } from "./shell-install.js"
 import { ensureAmbientInstructions, ensureProjectInstructions } from "./claude-md.js"
 import { ensureClaudeHooks } from "./claude-hooks.js"
 import { checkApiKey, validateApiKey } from "./api-key.js"
+import { ensureGlobalGitignore } from "./gitignore.js"
+import { ensureMcpRegistration } from "./mcp-register.js"
 import type { ShellInfo } from "./shell-detect.js"
 
 const BOLD = "\x1b[1m"
@@ -284,6 +286,24 @@ async function stepAgentInstructions(): Promise<void> {
     console.log(`  ${GREEN}+${RESET} Registered Claude Code hooks: ${hookResult.added.join(", ")}`)
   } else {
     console.log(`  ${GREEN}+${RESET} Claude Code hooks already registered`)
+  }
+
+  const mcpResult = ensureMcpRegistration()
+  if (mcpResult === "added") {
+    console.log(`  ${GREEN}+${RESET} Registered ambient MCP server in ~/.claude.json`)
+  } else if (mcpResult === "already-present") {
+    console.log(`  ${GREEN}+${RESET} MCP server already registered`)
+  } else {
+    console.log(`  ${YELLOW}!${RESET} Could not register MCP server (CLI not built?)`)
+  }
+
+  const gitignoreResult = ensureGlobalGitignore()
+  if (gitignoreResult === "added") {
+    console.log(`  ${GREEN}+${RESET} Added .ambient/ to global gitignore`)
+  } else if (gitignoreResult === "already-present") {
+    console.log(`  ${GREEN}+${RESET} Global gitignore already has .ambient/`)
+  } else {
+    console.log(`  ${YELLOW}!${RESET} Could not update global gitignore`)
   }
 
   // Update project-level instructions if in a project directory

@@ -7,6 +7,29 @@ const ACTIVITY_SCRIPT_NAME = "ambient-activity.sh"
 const FLUSH_SCRIPT_NAME = "ambient-flush.sh"
 
 /**
+ * Resolve the absolute path to the ambient CLI entry point.
+ * Used to generate hook scripts that don't depend on `ambient` being on PATH.
+ */
+function resolveCliPath(): string {
+  const thisFile = new URL(import.meta.url).pathname
+  const setupDir = thisFile.replace(/\/[^/]+$/, "")
+  const parentDir = setupDir.replace(/\/[^/]+$/, "")
+  return join(parentDir, "cli", "index.js")
+}
+
+/**
+ * Build the `node /abs/path/to/cli/index.js` invocation string.
+ * Falls back to bare `ambient` if the CLI file doesn't exist (e.g. global install).
+ */
+function ambientCommand(): string {
+  const cliPath = resolveCliPath()
+  if (existsSync(cliPath)) {
+    return `node "${cliPath}"`
+  }
+  return "ambient"
+}
+
+/**
  * Content of the periodic reminder script.
  * Runs on UserPromptSubmit. Emits a reminder every 20 minutes so long-running
  * sessions and post-/clear sessions don't forget about ambient.
@@ -45,6 +68,46 @@ interface ClaudeSettings {
 }
 
 /**
+ * Generate the activity hook script content with the resolved CLI path.
+ */
+function buildActivityScript(cli: string): string {
+  return `#!/bin/bash
+# Ambient passive monitoring — PostToolUse hook (managed by ambient — do not edit)
+INPUT=$(cat)
+TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
+[ -z "$TOOL" ] && exit 0
+FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
+DESC=$(echo "$INPUT" | jq -r '.tool_input.description // empty' 2>/dev/null)
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+[ -z "$CWD" ] && exit 0
+${cli} notify "{\\"type\\":\\"activity\\",\\"payload\\":{\\"cwd\\":\\"$CWD\\",\\"tool\\":\\"$TOOL\\",\\"filePath\\":\\"$FILE\\",\\"command\\":\\"$(echo "$CMD" | head -c 200)\\",\\"description\\":\\"$DESC\\"}}" 2>/dev/null
+exit 0
+`
+}
+
+/**
+ * Generate the flush hook script content with the resolved CLI path.
+ */
+function buildFlushScript(cli: string): string {
+  return `#!/bin/bash
+# Ambient passive monitoring — Stop hook (managed by ambient — do not edit)
+INPUT=$(cat)
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+[ -z "$CWD" ] && exit 0
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+REASONING=""
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+  REASONING=$(tail -200 "$TRANSCRIPT" 2>/dev/null | grep '"type":"assistant"' | tail -1 | \\
+    jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null | head -c 4000)
+fi
+REASONING_ESC=$(echo "$REASONING" | jq -Rs '.' 2>/dev/null | sed 's/^"//;s/"$//')
+${cli} notify "{\\"type\\":\\"activity-flush\\",\\"payload\\":{\\"cwd\\":\\"$CWD\\",\\"reasoning\\":\\"$REASONING_ESC\\"}}" 2>/dev/null
+exit 0
+`
+}
+
+/**
  * Ensure the periodic reminder script exists at ~/.ambient/hooks/ambient-remind.sh.
  * Creates the directory and script if missing. Overwrites if content differs.
  */
@@ -66,76 +129,40 @@ function ensureRemindScript(): string {
 }
 
 /**
- * Content of the PostToolUse hook script.
- * Captures tool activity (Edit, Write, Bash) and sends to daemon.
- * No stdout — completely invisible to Claude's context.
- */
-const ACTIVITY_SCRIPT = `#!/bin/bash
-# Ambient passive monitoring — PostToolUse hook (managed by ambient — do not edit)
-INPUT=$(cat)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
-[ -z "$TOOL" ] && exit 0
-FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
-DESC=$(echo "$INPUT" | jq -r '.tool_input.description // empty' 2>/dev/null)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-[ -z "$CWD" ] && exit 0
-ambient notify "{\\"type\\":\\"activity\\",\\"payload\\":{\\"cwd\\":\\"$CWD\\",\\"tool\\":\\"$TOOL\\",\\"filePath\\":\\"$FILE\\",\\"command\\":\\"$(echo "$CMD" | head -c 200)\\",\\"description\\":\\"$DESC\\"}}" 2>/dev/null
-exit 0
-`
-
-/**
- * Content of the Stop hook script.
- * Reads the last assistant message from the transcript for reasoning capture.
- * No stdout — completely invisible to Claude's context.
- */
-const FLUSH_SCRIPT = `#!/bin/bash
-# Ambient passive monitoring — Stop hook (managed by ambient — do not edit)
-INPUT=$(cat)
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-[ -z "$CWD" ] && exit 0
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
-REASONING=""
-if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-  REASONING=$(tail -200 "$TRANSCRIPT" 2>/dev/null | grep '"type":"assistant"' | tail -1 | \\
-    jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ")' 2>/dev/null | head -c 4000)
-fi
-REASONING_ESC=$(echo "$REASONING" | jq -Rs '.' 2>/dev/null | sed 's/^"//;s/"$//')
-ambient notify "{\\"type\\":\\"activity-flush\\",\\"payload\\":{\\"cwd\\":\\"$CWD\\",\\"reasoning\\":\\"$REASONING_ESC\\"}}" 2>/dev/null
-exit 0
-`
-
-/**
  * Ensure the activity hook script exists at ~/.ambient/hooks/ambient-activity.sh.
+ * Uses the resolved CLI path so `ambient` doesn't need to be on PATH.
  */
-function ensureActivityScript(): string {
+function ensureActivityScript(cli: string): string {
   const hooksDir = join(homedir(), ".ambient", "hooks")
   mkdirSync(hooksDir, { recursive: true })
   const scriptPath = join(hooksDir, ACTIVITY_SCRIPT_NAME)
+  const content = buildActivityScript(cli)
 
   if (existsSync(scriptPath)) {
     const existing = readFileSync(scriptPath, "utf-8")
-    if (existing === ACTIVITY_SCRIPT) return scriptPath
+    if (existing === content) return scriptPath
   }
 
-  writeFileSync(scriptPath, ACTIVITY_SCRIPT, { mode: 0o755 })
+  writeFileSync(scriptPath, content, { mode: 0o755 })
   return scriptPath
 }
 
 /**
  * Ensure the flush hook script exists at ~/.ambient/hooks/ambient-flush.sh.
+ * Uses the resolved CLI path so `ambient` doesn't need to be on PATH.
  */
-function ensureFlushScript(): string {
+function ensureFlushScript(cli: string): string {
   const hooksDir = join(homedir(), ".ambient", "hooks")
   mkdirSync(hooksDir, { recursive: true })
   const scriptPath = join(hooksDir, FLUSH_SCRIPT_NAME)
+  const content = buildFlushScript(cli)
 
   if (existsSync(scriptPath)) {
     const existing = readFileSync(scriptPath, "utf-8")
-    if (existing === FLUSH_SCRIPT) return scriptPath
+    if (existing === content) return scriptPath
   }
 
-  writeFileSync(scriptPath, FLUSH_SCRIPT, { mode: 0o755 })
+  writeFileSync(scriptPath, content, { mode: 0o755 })
   return scriptPath
 }
 
@@ -166,9 +193,10 @@ export function ensureClaudeHooks(): { added: string[]; skipped: string[] } {
   const settingsPath = join(homedir(), ".claude", "settings.json")
 
   try {
+    const cli = ambientCommand()
     const remindScriptPath = ensureRemindScript()
-    const activityScriptPath = ensureActivityScript()
-    const flushScriptPath = ensureFlushScript()
+    const activityScriptPath = ensureActivityScript(cli)
+    const flushScriptPath = ensureFlushScript(cli)
 
     // Load or create settings
     let settings: ClaudeSettings = {}

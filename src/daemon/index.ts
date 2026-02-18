@@ -41,6 +41,8 @@ import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.j
 import { processMergedBranches } from "../memory/lifecycle.js"
 import { ensureAmbientInstructions, ensureProjectInstructions } from "../setup/claude-md.js"
 import { ensureClaudeHooks } from "../setup/claude-hooks.js"
+import { ensureGlobalGitignore } from "../setup/gitignore.js"
+import { ensureMcpRegistration } from "../setup/mcp-register.js"
 import { PrivacyEngine } from "../privacy/engine.js"
 
 const daemonConfig = loadConfig()
@@ -1058,6 +1060,18 @@ async function startDaemon(): Promise<void> {
   const hookResult = ensureClaudeHooks()
   if (hookResult.added.length > 0) {
     log("info", `Registered Claude Code hooks: ${hookResult.added.join(", ")}`)
+  }
+
+  // Ensure .ambient/ is in global gitignore
+  const gitignoreResult = ensureGlobalGitignore()
+  if (gitignoreResult === "added") {
+    log("info", "Added .ambient/ to global gitignore")
+  }
+
+  // Ensure ambient MCP server is registered in ~/.claude.json
+  const mcpResult = ensureMcpRegistration()
+  if (mcpResult === "added") {
+    log("info", "Registered ambient MCP server in ~/.claude.json")
   }
 
   // Migrate legacy memory files to two-level format

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, writeFileSync, mkdirSync } from "node:fs"
 import { join, dirname } from "node:path"
 import type { MemoryKey, ProjectMemory, ShellContext, TaskMemory } from "../types/index.js"
 import { loadProjectMemory, loadTaskMemory } from "./store.js"
@@ -6,7 +6,6 @@ import { loadProjectMemory, loadTaskMemory } from "./store.js"
 const CONTEXT_FILE_PATH = ".ambient/context.md"
 const MAX_BYTES = 4096
 const DEBOUNCE_MS = 1_000
-const GITIGNORE_ENTRY = "\n# Ambient context (auto-generated)\n.ambient/\n"
 
 /**
  * ContextFileGenerator manages the lifecycle of .ambient/context.md
@@ -67,7 +66,6 @@ export class ContextFileGenerator {
       }
 
       writeFileSync(filePath, content, "utf-8")
-      ensureGitignored(gitRoot)
     } catch {
       // Silently fail — context file is best-effort.
       // Handles read-only filesystems, permission errors, etc.
@@ -184,25 +182,6 @@ function trimToBytes(sections: string[], maxBytes: number): string {
     result = candidate
   }
   return result.trimEnd() + "\n"
-}
-
-/**
- * Ensure .ambient/ is in the project's .gitignore.
- */
-function ensureGitignored(gitRoot: string): void {
-  const gitignorePath = join(gitRoot, ".gitignore")
-
-  try {
-    if (existsSync(gitignorePath)) {
-      const content = readFileSync(gitignorePath, "utf-8")
-      if (/^\.ambient\/?$/m.test(content)) return
-      writeFileSync(gitignorePath, content.trimEnd() + GITIGNORE_ENTRY, "utf-8")
-    } else {
-      writeFileSync(gitignorePath, GITIGNORE_ENTRY.trimStart(), "utf-8")
-    }
-  } catch {
-    // Skip silently if we can't write .gitignore
-  }
 }
 
 /**
