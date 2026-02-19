@@ -15,7 +15,7 @@ vi.mock("node:os", async (importOriginal) => {
 })
 
 // Import after mock is set up
-const { ensureAmbientInstructions, ensureProjectInstructions, initProjectInstructions, SUPPORTED_AGENTS } = await import("../../src/setup/claude-md.js")
+const { ensureAmbientInstructions } = await import("../../src/setup/claude-md.js")
 
 describe("claude-md", () => {
   let tmpDir: string
@@ -81,7 +81,7 @@ Old content here.
       // Old version should be gone
       expect(content).not.toContain("version:1")
       // New version should be present
-      expect(content).toContain("version:3")
+      expect(content).toContain("version:4")
       expect(content).not.toContain("Old Instructions")
     })
 
@@ -115,7 +115,7 @@ Some important content below.
       expect(updated).toContain("# Header")
       expect(updated).toContain("Some important content above.")
       expect(updated).toContain("Some important content below.")
-      expect(updated).toContain("version:3")
+      expect(updated).toContain("version:4")
     })
 
     it("resolves to ~/.claude/CLAUDE.md when that exists instead of ~/CLAUDE.md", () => {
@@ -132,142 +132,6 @@ Some important content below.
 
       // ~/CLAUDE.md should NOT exist
       expect(existsSync(join(tmpDir, "CLAUDE.md"))).toBe(false)
-    })
-  })
-
-  // ---- ensureProjectInstructions ----
-
-  describe("ensureProjectInstructions", () => {
-    it("only updates existing files, does not create new ones", () => {
-      const projectDir = join(tmpDir, "my-project")
-      mkdirSync(projectDir, { recursive: true })
-
-      // Create ONLY a CLAUDE.md in the project
-      writeFileSync(join(projectDir, "CLAUDE.md"), "# Project\n")
-
-      const result = ensureProjectInstructions(projectDir)
-
-      // CLAUDE.md should be updated
-      expect(result.updated).toContain("CLAUDE.md")
-
-      // Other instruction files should NOT have been created
-      expect(existsSync(join(projectDir, "AGENTS.md"))).toBe(false)
-      expect(existsSync(join(projectDir, "GEMINI.md"))).toBe(false)
-      expect(existsSync(join(projectDir, ".goosehints"))).toBe(false)
-    })
-
-    it("returns current for files already up to date", () => {
-      const projectDir = join(tmpDir, "my-project")
-      mkdirSync(projectDir, { recursive: true })
-      writeFileSync(join(projectDir, "CLAUDE.md"), "# Project\n")
-
-      // First call updates
-      ensureProjectInstructions(projectDir)
-
-      // Second call should detect they're current
-      const result = ensureProjectInstructions(projectDir)
-      expect(result.current).toContain("CLAUDE.md")
-      expect(result.updated).toHaveLength(0)
-    })
-
-    it("updates multiple existing instruction files", () => {
-      const projectDir = join(tmpDir, "multi-agent")
-      mkdirSync(projectDir, { recursive: true })
-      writeFileSync(join(projectDir, "CLAUDE.md"), "# Claude\n")
-      writeFileSync(join(projectDir, "AGENTS.md"), "# Codex\n")
-      writeFileSync(join(projectDir, ".goosehints"), "# Goose\n")
-
-      const result = ensureProjectInstructions(projectDir)
-      expect(result.updated).toContain("CLAUDE.md")
-      expect(result.updated).toContain("AGENTS.md")
-      expect(result.updated).toContain(".goosehints")
-    })
-
-    it("handles empty project directory gracefully", () => {
-      const projectDir = join(tmpDir, "empty-project")
-      mkdirSync(projectDir, { recursive: true })
-
-      const result = ensureProjectInstructions(projectDir)
-      expect(result.updated).toHaveLength(0)
-      expect(result.current).toHaveLength(0)
-    })
-  })
-
-  // ---- initProjectInstructions ----
-
-  describe("initProjectInstructions", () => {
-    it("creates files for specified agents", () => {
-      const projectDir = join(tmpDir, "new-project")
-      mkdirSync(projectDir, { recursive: true })
-
-      const created = initProjectInstructions(projectDir, ["codex", "gemini"])
-
-      expect(created).toContain("AGENTS.md")
-      expect(created).toContain("GEMINI.md")
-      expect(existsSync(join(projectDir, "AGENTS.md"))).toBe(true)
-      expect(existsSync(join(projectDir, "GEMINI.md"))).toBe(true)
-    })
-
-    it("maps agent names to correct file paths", () => {
-      const projectDir = join(tmpDir, "mapping-test")
-      mkdirSync(projectDir, { recursive: true })
-
-      initProjectInstructions(projectDir, ["claude"])
-      expect(existsSync(join(projectDir, "CLAUDE.md"))).toBe(true)
-
-      initProjectInstructions(projectDir, ["copilot"])
-      expect(existsSync(join(projectDir, ".github", "copilot-instructions.md"))).toBe(true)
-
-      initProjectInstructions(projectDir, ["cursor"])
-      expect(existsSync(join(projectDir, ".cursorrules"))).toBe(true)
-
-      initProjectInstructions(projectDir, ["windsurf"])
-      expect(existsSync(join(projectDir, ".windsurfrules"))).toBe(true)
-
-      initProjectInstructions(projectDir, ["goose"])
-      expect(existsSync(join(projectDir, ".goosehints"))).toBe(true)
-    })
-
-    it("ignores unknown agent names", () => {
-      const projectDir = join(tmpDir, "unknown-agents")
-      mkdirSync(projectDir, { recursive: true })
-
-      const created = initProjectInstructions(projectDir, ["unknown-agent", "nonexistent"])
-      expect(created).toHaveLength(0)
-    })
-
-    it("handles case-insensitive agent names", () => {
-      const projectDir = join(tmpDir, "case-test")
-      mkdirSync(projectDir, { recursive: true })
-
-      const created = initProjectInstructions(projectDir, ["CODEX", "Gemini"])
-      expect(created).toContain("AGENTS.md")
-      expect(created).toContain("GEMINI.md")
-    })
-
-    it("created files contain ambient memory instructions", () => {
-      const projectDir = join(tmpDir, "content-check")
-      mkdirSync(projectDir, { recursive: true })
-
-      initProjectInstructions(projectDir, ["codex"])
-
-      const content = readFileSync(join(projectDir, "AGENTS.md"), "utf-8")
-      expect(content).toContain("ambient:memory-instructions")
-      expect(content).toContain("Ambient Memory (REQUIRED)")
-    })
-  })
-
-  // ---- SUPPORTED_AGENTS constant ----
-
-  describe("SUPPORTED_AGENTS", () => {
-    it("includes expected agent names", () => {
-      expect(SUPPORTED_AGENTS).toContain("claude")
-      expect(SUPPORTED_AGENTS).toContain("codex")
-      expect(SUPPORTED_AGENTS).toContain("gemini")
-      expect(SUPPORTED_AGENTS).toContain("copilot")
-      expect(SUPPORTED_AGENTS).toContain("cursor")
-      expect(SUPPORTED_AGENTS).toContain("windsurf")
-      expect(SUPPORTED_AGENTS).toContain("goose")
     })
   })
 })

@@ -4,7 +4,7 @@ import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { detectShell, detectAllShells } from "./shell-detect.js"
 import { installShellHooks, getShellScriptPath } from "./shell-install.js"
-import { ensureAmbientInstructions, ensureProjectInstructions } from "./claude-md.js"
+import { ensureAmbientInstructions } from "./claude-md.js"
 import { ensureClaudeHooks } from "./claude-hooks.js"
 import { checkApiKey, validateApiKey } from "./api-key.js"
 import type { ShellInfo } from "./shell-detect.js"
@@ -284,16 +284,6 @@ async function stepAgentInstructions(): Promise<void> {
     console.log(`  ${GREEN}+${RESET} Registered Claude Code hooks: ${hookResult.added.join(", ")}`)
   } else {
     console.log(`  ${GREEN}+${RESET} Claude Code hooks already registered`)
-  }
-
-  // Update project-level instructions if in a project directory
-  const cwd = process.cwd()
-  const projectResult = ensureProjectInstructions(cwd)
-  if (projectResult.updated.length > 0) {
-    console.log(`  ${GREEN}+${RESET} Updated project instruction files: ${projectResult.updated.join(", ")}`)
-  }
-  if (projectResult.current.length > 0) {
-    console.log(`  ${DIM}  Project files already current: ${projectResult.current.join(", ")}${RESET}`)
   }
 
   console.log()

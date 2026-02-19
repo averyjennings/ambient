@@ -36,16 +36,14 @@ import { resolveMemoryKey, resolveGitRoot } from "../memory/resolve.js"
 import { migrateIfNeeded } from "../memory/migrate.js"
 import { streamFastLlm, callFastLlm, setUsageTracker } from "../assist/fast-llm.js"
 import { UsageTracker } from "../usage/tracker.js"
-import { ContextFileGenerator } from "../memory/context-file.js"
 import { compactProjectIfNeeded, compactTaskIfNeeded } from "../memory/compact.js"
 import { processMergedBranches } from "../memory/lifecycle.js"
-import { ensureAmbientInstructions, ensureProjectInstructions } from "../setup/claude-md.js"
+import { ensureAmbientInstructions } from "../setup/claude-md.js"
 import { ensureClaudeHooks } from "../setup/claude-hooks.js"
 import { PrivacyEngine } from "../privacy/engine.js"
 
 const daemonConfig = loadConfig()
 const context = new ContextEngine()
-const contextFileGen = new ContextFileGenerator()
 const privacy = new PrivacyEngine(daemonConfig.privacy)
 
 // Per-branch session state — keyed by "projectKey:taskKey"
@@ -68,7 +66,6 @@ const ACTIVITY_BUFFER_MAX = 50
 const ACTIVITY_MIN_FOR_EXTRACTION = 3
 
 // Track project dirs where we've already ensured instruction files
-const instructionsDirs = new Set<string>()
 
 // Suppress repeated API key warnings
 let apiKeyWarned = false
@@ -489,15 +486,6 @@ async function handleRequest(
 
       // Resolve per-branch session
       const memKey = resolveMemoryKey(payload.cwd)
-
-      // Ensure project-level agent instruction files on first contact with a directory
-      if (!instructionsDirs.has(payload.cwd)) {
-        instructionsDirs.add(payload.cwd)
-        const projResult = ensureProjectInstructions(payload.cwd)
-        if (projResult.updated.length > 0) {
-          log("info", `Updated project instruction files: ${projResult.updated.join(", ")}`)
-        }
-      }
 
       const sKey = sessionKeyFromMemoryKey(memKey)
       let session = sessions.get(sKey) ?? null
