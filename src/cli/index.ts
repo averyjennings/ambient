@@ -172,7 +172,7 @@ async function main(): Promise<void> {
   // `ambient setup` — global + project-level (existing files only)
   // `ambient setup --agents codex,gemini` — also create instruction files for named agents
   if (args[0] === "setup") {
-    const { ensureAmbientInstructions, ensureProjectInstructions, initProjectInstructions, SUPPORTED_AGENTS } = await import("../setup/claude-md.js")
+    const { ensureAmbientInstructions } = await import("../setup/claude-md.js")
     const { ensureClaudeHooks } = await import("../setup/claude-hooks.js")
 
     // Global ~/CLAUDE.md
@@ -188,27 +188,7 @@ async function main(): Promise<void> {
       console.log(`Claude Code hooks already present: ${hookResult.skipped.join(", ")}`)
     }
 
-    // Project-level instruction files (update existing ones)
-    const projectResult = ensureProjectInstructions(process.cwd())
-    if (projectResult.updated.length > 0) {
-      console.log(`Project instruction files updated: ${projectResult.updated.join(", ")}`)
-    }
-    if (projectResult.current.length > 0) {
-      console.log(`Project instruction files current: ${projectResult.current.join(", ")}`)
-    }
-
-    // --agents flag: create instruction files for specific agents
-    const agentsIdx = args.indexOf("--agents")
-    if (agentsIdx !== -1 && args[agentsIdx + 1]) {
-      const agents = args[agentsIdx + 1]!.split(",").map(a => a.trim())
-      const created = initProjectInstructions(process.cwd(), agents)
-      if (created.length > 0) {
-        console.log(`Created instruction files: ${created.join(", ")}`)
-      }
-    }
-
-    console.log(`\nSetup complete. Supported agents: ${SUPPORTED_AGENTS.join(", ")}`)
-    console.log(`To create instruction files for other agents: ambient setup --agents codex,gemini,copilot`)
+    console.log(`\nSetup complete.`)
     return
   }
 

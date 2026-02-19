@@ -60,22 +60,6 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 ${AMBIENT_MARKER_END}
 `
 
-// --- Multi-agent instruction file support ---
-
-/**
- * Known project-level agent instruction files.
- * When these exist in a project, ambient updates them with memory instructions.
- */
-const PROJECT_INSTRUCTION_FILES = [
-  "CLAUDE.md",                        // Claude Code
-  "AGENTS.md",                        // OpenAI Codex CLI
-  "GEMINI.md",                        // Google Gemini CLI
-  ".github/copilot-instructions.md",  // GitHub Copilot
-  ".cursorrules",                     // Cursor
-  ".windsurfrules",                   // Windsurf
-  ".goosehints",                      // Goose
-]
-
 /**
  * Upsert the ambient instruction section into an existing file.
  * Uses HTML comment markers for idempotent add/update/skip.
@@ -149,80 +133,3 @@ export function ensureAmbientInstructions(): "added" | "updated" | "current" | "
   }
 }
 
-// --- Project-level instruction files ---
-
-export interface ProjectInstructionsResult {
-  /** Files that were updated (already existed, got ambient section added/refreshed) */
-  updated: string[]
-  /** Files that were already current */
-  current: string[]
-}
-
-/**
- * Update existing agent instruction files in a project directory with ambient instructions.
- * Only modifies files that ALREADY EXIST — never creates new ones to avoid
- * cluttering repos with files for agents the user doesn't use.
- *
- * Call this on daemon startup for the active cwd, or via `ambient setup`.
- */
-export function ensureProjectInstructions(projectDir: string): ProjectInstructionsResult {
-  const updated: string[] = []
-  const current: string[] = []
-
-  for (const relPath of PROJECT_INSTRUCTION_FILES) {
-    const fullPath = join(projectDir, relPath)
-    if (!existsSync(fullPath)) continue
-
-    try {
-      const result = upsertSection(fullPath)
-      if (result === "added" || result === "updated") {
-        updated.push(relPath)
-      } else {
-        current.push(relPath)
-      }
-    } catch {
-      // skip files we can't write to
-    }
-  }
-
-  return { updated, current }
-}
-
-/**
- * Create ambient instruction sections in specified agent instruction files.
- * Unlike ensureProjectInstructions, this CREATES files that don't exist.
- * Used by `ambient setup --agents` to initialize instruction files for chosen agents.
- */
-export function initProjectInstructions(projectDir: string, agents: string[]): string[] {
-  const agentToFile: Record<string, string> = {
-    "claude": "CLAUDE.md",
-    "codex": "AGENTS.md",
-    "gemini": "GEMINI.md",
-    "copilot": ".github/copilot-instructions.md",
-    "cursor": ".cursorrules",
-    "windsurf": ".windsurfrules",
-    "goose": ".goosehints",
-  }
-
-  const created: string[] = []
-
-  for (const agent of agents) {
-    const relPath = agentToFile[agent.toLowerCase()]
-    if (!relPath) continue
-
-    const fullPath = join(projectDir, relPath)
-    try {
-      const result = upsertSection(fullPath)
-      if (result === "added" || result === "updated") {
-        created.push(relPath)
-      }
-    } catch {
-      // skip
-    }
-  }
-
-  return created
-}
-
-/** List of supported agent names for initProjectInstructions. */
-export const SUPPORTED_AGENTS = ["claude", "codex", "gemini", "copilot", "cursor", "windsurf", "goose"] as const
