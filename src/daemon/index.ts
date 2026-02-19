@@ -384,22 +384,18 @@ async function handleRequest(
 
       context.update(payload)
 
-      // Trigger context file regeneration
+      // Trigger branch lifecycle and memory persistence
       const gitRoot = resolveGitRoot(payload.cwd)
       if (gitRoot) {
         const memKey = resolveMemoryKey(payload.cwd)
-        const shellCtx = context.getContext()
         if (payload.event === "chpwd") {
-          contextFileGen.regenerateNow(gitRoot, shellCtx, memKey)
           // Check for merged branches on directory change (runs async)
           setTimeout(() => {
             processMergedBranches(gitRoot, memKey.projectKey, memKey.projectName, memKey.origin)
           }, 0)
         } else if (payload.event === "precmd") {
-          contextFileGen.scheduleRegeneration(gitRoot, shellCtx, memKey)
-
           // Persist notable shell commands as memories
-          const lastCmd = shellCtx.lastCommand
+          const lastCmd = context.getContext().lastCommand
           const exitCode = payload.exitCode ?? 0
           if (lastCmd) {
             const notable = classifyCommand(lastCmd, exitCode)
@@ -438,12 +434,6 @@ async function handleRequest(
       }
       sessions.delete(sKey)
       sessionMemoryKeys.delete(sKey)
-
-      // Regenerate context file for new session
-      const gitRoot = resolveGitRoot(cwd)
-      if (gitRoot) {
-        contextFileGen.regenerateNow(gitRoot, context.getContext(), memKey)
-      }
 
       log("info", `Session reset for ${memKey.projectName}:${memKey.branchName}`)
       sendResponse(socket, { type: "done", data: "ok" })
@@ -837,12 +827,6 @@ ${input}`
       }
       addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
 
-      // Regenerate context file after memory write (debounced)
-      const memStoreGitRoot = resolveGitRoot(payload.cwd)
-      if (memStoreGitRoot) {
-        contextFileGen.scheduleRegeneration(memStoreGitRoot, context.getContext(), memKey)
-      }
-
       // Trigger compaction asynchronously (non-blocking)
       setTimeout(() => {
         compactTaskIfNeeded(memKey.projectKey, memKey.taskKey).catch(() => {})
@@ -892,10 +876,6 @@ ${input}`
       const deleted = deleteMemoryEvent(memKey, payload.eventId)
       if (deleted) {
         log("info", `Memory deleted: ${payload.eventId}`)
-        const deleteGitRoot = resolveGitRoot(payload.cwd)
-        if (deleteGitRoot) {
-          contextFileGen.scheduleRegeneration(deleteGitRoot, context.getContext(), memKey)
-        }
       }
       // Idempotent: return success whether event existed or not
       sendResponse(socket, { type: "done", data: "ok" })
@@ -912,10 +892,6 @@ ${input}`
       const updated = updateMemoryEvent(memKey, payload.eventId, payload.newContent)
       if (updated) {
         log("info", `Memory updated: ${payload.eventId}`)
-        const updateGitRoot = resolveGitRoot(payload.cwd)
-        if (updateGitRoot) {
-          contextFileGen.scheduleRegeneration(updateGitRoot, context.getContext(), memKey)
-        }
         sendResponse(socket, { type: "done", data: "ok" })
       } else {
         sendResponse(socket, { type: "error", data: `Event not found: ${payload.eventId}` })
