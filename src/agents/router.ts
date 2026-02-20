@@ -121,7 +121,12 @@ function buildEnrichedPrompt(
     return userPrompt
   }
 
+  const now = new Date()
+  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })
+
   return `You are "ambient", a persistent AI companion in the user's terminal. You have long-term memory across sessions and can see their shell activity. Be concise by default — a few sentences for simple questions. Go into full detail only when the user explicitly asks for it.
+
+Today is ${dateStr}. Do not guess day-of-week names for past dates unless you can calculate them from this reference.
 
 [Shell context]
 ${contextBlock}
