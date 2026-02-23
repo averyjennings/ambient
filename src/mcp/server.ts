@@ -57,11 +57,12 @@ async function writeMemoryEvent(
   eventType: MemoryEvent["type"],
   content: string,
   importance: MemoryEvent["importance"],
+  scope: MemoryEvent["scope"] = "task",
   metadata?: Record<string, string>,
 ): Promise<string> {
   const result = await sendDaemonRequest({
     type: "memory-store",
-    payload: { cwd, eventType, content, importance, metadata },
+    payload: { cwd, eventType, content, importance, scope, metadata },
   })
 
   if (result.ok) return "Memory recorded (via daemon)."
@@ -74,10 +75,11 @@ async function writeMemoryEvent(
     timestamp: Date.now(),
     content: content.slice(0, 1000),
     importance,
+    scope,
     metadata,
   }
 
-  if (importance === "high") {
+  if (scope === "project") {
     addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
   }
   addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
@@ -308,14 +310,15 @@ export function createAmbientMcpServer(options: McpServerOptions): McpServer {
 
   server.tool(
     "store_decision",
-    "Record an important decision about the project or current task. Persists across sessions.",
+    "Record a decision. Defaults to branch-scoped (task). Use scope 'project' only for decisions that affect ALL branches (infrastructure, DB conventions, tooling).",
     {
       decision: z.string().describe("The decision that was made"),
       reasoning: z.string().optional().describe("Why this decision was made"),
+      scope: z.enum(["task", "project"]).optional().describe("Scope: 'task' (default, this branch only) or 'project' (all branches)"),
     },
-    async ({ decision, reasoning }) => {
+    async ({ decision, reasoning, scope }) => {
       const content = reasoning ? `${decision} (Reason: ${reasoning})` : decision
-      const text = await writeMemoryEvent(cwd, "decision", content, "high")
+      const text = await writeMemoryEvent(cwd, "decision", content, "high", scope ?? "task")
       return { content: [{ type: "text" as const, text }] }
     },
   )
@@ -341,11 +344,12 @@ export function createAmbientMcpServer(options: McpServerOptions): McpServer {
       error: z.string().describe("The error that occurred"),
       resolution: z.string().describe("How it was resolved"),
       file: z.string().optional().describe("File where the error occurred"),
+      scope: z.enum(["task", "project"]).optional().describe("Scope: 'task' (default, this branch only) or 'project' (all branches)"),
     },
-    async ({ error, resolution, file }) => {
+    async ({ error, resolution, file, scope }) => {
       const content = `Error: ${error}\nResolution: ${resolution}`
       const metadata = file ? { file } : undefined
-      const text = await writeMemoryEvent(cwd, "error-resolution", content, "medium", metadata)
+      const text = await writeMemoryEvent(cwd, "error-resolution", content, "medium", scope ?? "task", metadata)
       return { content: [{ type: "text" as const, text }] }
     },
   )

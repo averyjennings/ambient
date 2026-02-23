@@ -6,7 +6,7 @@ const AMBIENT_MARKER_START = "<!-- ambient:memory-instructions -->"
 const AMBIENT_MARKER_END = "<!-- /ambient:memory-instructions -->"
 
 // Version bump this when the section content changes so existing installs get updated.
-const AMBIENT_SECTION_VERSION = "4"
+const AMBIENT_SECTION_VERSION = "5"
 const AMBIENT_VERSION_MARKER = `<!-- ambient:version:${AMBIENT_SECTION_VERSION} -->`
 
 const AMBIENT_SECTION = `
@@ -32,7 +32,23 @@ Ambient is your persistent memory across sessions, scoped to project and git bra
 | You start a significant chunk of work | \`store_task_update\` (status: started) |
 | You finish a significant chunk of work | \`store_task_update\` (status: completed) |
 
-### Cross-session awareness — see what other sessions/projects are doing:
+### Scope — task vs project
+
+Decisions default to **task** scope (this branch only). Use \`scope: "project"\` only for decisions that affect ALL branches:
+- Infrastructure/deployment conventions (e.g., "Use Docker multi-stage builds")
+- Database schema conventions (e.g., "All tables use UUID primary keys")
+- Shared tooling choices (e.g., "Chose pnpm over npm for workspace support")
+- Cross-cutting coding standards (e.g., "Use guard clauses over nested if/else")
+
+Branch-specific decisions (API design for a feature, bug root causes, implementation approaches) should stay at task scope — they're still searchable via \`search_all_memory\` when needed.
+
+### Searching across branches — use \`search_all_memory\` when:
+- You're about to make an architectural decision and want to check if a similar choice was made on another branch
+- The user references work done on a different branch or in a different project
+- You're on a new branch with no task memories and need prior context
+- You're debugging an issue that might have been seen before
+
+### Cross-session awareness:
 - \`get_recent_activity\` — recent events across ALL projects, no query needed
 - \`search_all_memory\` — search across all projects/branches by keyword
 

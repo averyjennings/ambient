@@ -159,16 +159,19 @@ export function parseAndStoreMemoryJsonLines(
       if (isDuplicateEvent(memKey.projectKey, memKey.taskKey, item.content)) continue
       storedPrefixes.add(prefix)
 
+      const scope = (item as { scope?: string }).scope === "project" ? "project" as const : "task" as const
+
       const event = {
         id: globalThis.crypto.randomUUID(),
         type: eventType,
         timestamp: Date.now(),
         content: item.content.slice(0, 1000),
         importance,
+        scope,
         ...(options?.metadata ? { metadata: options.metadata } : {}),
       }
 
-      if (importance === "high") {
+      if (scope === "project") {
         addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
       }
       addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)

@@ -81,7 +81,7 @@ Old content here.
       // Old version should be gone
       expect(content).not.toContain("version:1")
       // New version should be present
-      expect(content).toContain("version:4")
+      expect(content).toContain("version:5")
       expect(content).not.toContain("Old Instructions")
     })
 
@@ -115,7 +115,7 @@ Some important content below.
       expect(updated).toContain("# Header")
       expect(updated).toContain("Some important content above.")
       expect(updated).toContain("Some important content below.")
-      expect(updated).toContain("version:4")
+      expect(updated).toContain("version:5")
     })
 
     it("resolves to ~/.claude/CLAUDE.md when that exists instead of ~/CLAUDE.md", () => {

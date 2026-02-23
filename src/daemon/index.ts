@@ -813,6 +813,7 @@ ${input}`
       metrics.memoryStoresTotal++
       const memKey = resolveMemoryKey(payload.cwd)
       const importance = payload.importance ?? "medium"
+      const scope = payload.scope ?? "task"
 
       const event = {
         id: globalThis.crypto.randomUUID(),
@@ -820,11 +821,12 @@ ${input}`
         timestamp: Date.now(),
         content: payload.content.slice(0, 1000),
         importance,
+        scope,
         metadata: payload.metadata,
       } as const
 
-      // High-importance events go to both project and task; others just to task
-      if (importance === "high") {
+      // Project-scoped events go to both project and task; task-scoped only to task
+      if (scope === "project") {
         addProjectEvent(memKey.projectKey, memKey.projectName, memKey.origin, event)
       }
       addTaskEvent(memKey.projectKey, memKey.taskKey, memKey.branchName, event)
@@ -832,7 +834,7 @@ ${input}`
       // Trigger compaction asynchronously (non-blocking)
       setTimeout(() => {
         compactTaskIfNeeded(memKey.projectKey, memKey.taskKey).catch(() => {})
-        if (importance === "high") {
+        if (scope === "project") {
           compactProjectIfNeeded(memKey.projectKey).catch(() => {})
         }
       }, 0)

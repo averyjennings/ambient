@@ -168,6 +168,7 @@ export type MemoryEventType =
   | "session-summary"
 
 export type MemoryImportance = "low" | "medium" | "high"
+export type MemoryScope = "task" | "project"
 
 export interface MemoryEvent {
   readonly id: string
@@ -175,6 +176,7 @@ export interface MemoryEvent {
   readonly timestamp: number
   readonly content: string
   readonly importance: MemoryImportance
+  readonly scope?: MemoryScope
   readonly metadata?: Readonly<Record<string, string>>
 }
 
@@ -215,6 +217,7 @@ export interface MemoryStorePayload {
   readonly eventType: MemoryEventType
   readonly content: string
   readonly importance?: MemoryImportance
+  readonly scope?: MemoryScope
   readonly metadata?: Record<string, string>
 }
 

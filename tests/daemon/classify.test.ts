@@ -290,16 +290,16 @@ describe("parseAndStoreMemoryJsonLines", () => {
     expect(addTaskEvent).toHaveBeenCalledTimes(2)
   })
 
-  it("calls addProjectEvent for high-importance events", () => {
-    const input = '{"type":"decision","content":"Use JWT tokens","importance":"high"}'
+  it("calls addProjectEvent for project-scoped events", () => {
+    const input = '{"type":"decision","content":"Use JWT tokens","importance":"high","scope":"project"}'
     parseAndStoreMemoryJsonLines(input, memKey)
 
     expect(addProjectEvent).toHaveBeenCalledTimes(1)
     expect(addTaskEvent).toHaveBeenCalledTimes(1)
   })
 
-  it("does not call addProjectEvent for non-high-importance events", () => {
-    const input = '{"type":"task-update","content":"Minor update","importance":"low"}'
+  it("does not call addProjectEvent for task-scoped events", () => {
+    const input = '{"type":"decision","content":"Use JWT tokens","importance":"high"}'
     parseAndStoreMemoryJsonLines(input, memKey)
 
     expect(addProjectEvent).not.toHaveBeenCalled()

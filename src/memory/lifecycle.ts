@@ -75,7 +75,7 @@ export function promoteTaskDecisions(
   const toPromote = task.events.filter(
     (e) =>
       e.type === "decision" &&
-      e.importance === "high" &&
+      e.scope === "project" &&
       !existingContents.has(e.content),
   )
 
