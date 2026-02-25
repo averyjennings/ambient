@@ -51,6 +51,9 @@ if [[ -z "$AMBIENT_BIN" ]]; then
   fi
 fi
 
+# --- Load zsh/datetime for $EPOCHSECONDS (used by rate limiting) ---
+zmodload zsh/datetime 2>/dev/null
+
 # --- Send a fire-and-forget message to the daemon ---
 _ambient_notify() {
   # Use `r notify` — no socat dependency needed
@@ -91,6 +94,15 @@ _ambient_json_escape() {
 # --- Auto-assist state ---
 _ambient_last_command=""
 _ambient_handled_by_cnf=0  # flag: command_not_found_handler already responded
+_ambient_last_assist_ts=0  # epoch seconds of last auto-assist (for rate limiting)
+
+# --- Subcommand CLI whitelist ---
+# Tools with subcommands where a failed invocation likely means a typo.
+# These get auto-assist in precmd on non-zero exit, rate-limited.
+_ambient_subcommand_clis=(
+  git docker kubectl helm npm pnpm yarn cargo gh gcloud az aws
+  podman nerdctl kind minikube terraform pulumi
+)
 
 # --- command_not_found_handler ---
 # Intercepts "command not found" BEFORE zsh prints its error.
@@ -126,6 +138,34 @@ _ambient_precmd() {
 
   _ambient_refresh_git
   _ambient_notify "{\"type\":\"context-update\",\"payload\":{\"event\":\"precmd\",\"exitCode\":${exit_code},\"cwd\":\"$PWD\",\"gitBranch\":\"${_ambient_git_branch}\",\"gitDirty\":${_ambient_git_dirty}}}"
+
+  # Auto-assist for failed subcommand CLIs (e.g. "git statbus")
+  # Skip if: no failure, no last command, already handled by command_not_found_handler,
+  # or command contains shell metacharacters (pipelines, chains — too complex to assist on)
+  if (( exit_code != 0 )) && [[ -n "$_ambient_last_command" ]] && (( _ambient_handled_by_cnf == 0 )); then
+    local cmd="$_ambient_last_command"
+    # Skip compound commands
+    if [[ "$cmd" != *'|'* && "$cmd" != *'&&'* && "$cmd" != *'||'* && "$cmd" != *';'* ]]; then
+      local first_word="${cmd%% *}"
+      local is_subcmd_cli=0
+      for w in "${_ambient_subcommand_clis[@]}"; do
+        [[ "$first_word" == "$w" ]] && { is_subcmd_cli=1; break }
+      done
+      if (( is_subcmd_cli )); then
+        # Rate limit: at most once per 10 seconds
+        local now
+        now=$EPOCHSECONDS
+        if (( now - _ambient_last_assist_ts >= 10 )); then
+          _ambient_last_assist_ts=$now
+          local response
+          response=$(perl -e 'alarm 4; exec @ARGV' ${=AMBIENT_BIN} assist "$cmd" "$exit_code" 2>/dev/null)
+          if [[ -n "$response" ]]; then
+            printf '\033[2m\033[33m  ambient → %s\033[0m\n' "$response"
+          fi
+        fi
+      fi
+    fi
+  fi
 }
 
 # chpwd: runs when the directory changes
